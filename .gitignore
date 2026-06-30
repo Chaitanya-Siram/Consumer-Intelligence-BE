@@ -1,0 +1,30 @@
+
+# Ignore all text files
+*.pyc
+
+# Ignore virtual env
+.venv
+venv*
+
+# Config File
+.env
+
+# Ignore config file
+
+es_config.txt
+
+#database file
+db.sqlite3
+
+# OS-specific files
+.DS_Store  # macOS
+Thumbs.db  # Windows
+
+en_core_web_lg
+
+asml*
+tesla*
+
+frontend
+dump*
+example_user_input*
