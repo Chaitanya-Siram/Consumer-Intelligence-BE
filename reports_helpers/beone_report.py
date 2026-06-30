@@ -33,7 +33,7 @@ LINK_BLUE = RGBColor(0x05, 0x63, 0xC1)
 
 TOP_BOOKMARK = "report_top"
 
-LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "beone_logo.jpeg")
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "placeholder.png")
 # Reference banner dimensions (EMU) — ~6.27in x 1.26in.
 LOGO_WIDTH = Emu(5731510)
 LOGO_HEIGHT = Emu(1155065)
