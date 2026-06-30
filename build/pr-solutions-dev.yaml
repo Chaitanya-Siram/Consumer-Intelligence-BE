@@ -1,0 +1,153 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: pr-solutions
+  name: pr-solutions
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pr-solutions
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: pr-solutions
+    spec:
+      containers:
+      - image: 958065208983.dkr.ecr.us-west-1.amazonaws.com/pr-solutions-v2:_BUILD__ID_
+        name: pr-solutions-v2
+        imagePullPolicy: Always
+        resources: {}
+        ports:
+          - containerPort: 80
+        env:
+          - name: ENVIRONMENT
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: ENVIRONMENT
+          - name: ANTHROPIC_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: ANTHROPIC_API_KEY
+          - name: CLAUDE_MODEL
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: CLAUDE_MODEL
+          - name: LLM_CONCURRENCY
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: LLM_CONCURRENCY
+          - name: AZURE_OPENAI_ENDPOINT
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AZURE_OPENAI_ENDPOINT
+          - name: AZURE_OPENAI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AZURE_OPENAI_API_KEY
+          - name: AZURE_OPENAI_API_VERSION
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AZURE_OPENAI_API_VERSION
+          - name: AZURE_OPENAI_MODEL
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AZURE_OPENAI_MODEL
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AWS_ACCESS_KEY_ID
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AWS_SECRET_ACCESS_KEY
+          - name: AWS_REGION
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AWS_REGION
+          - name: AWS_S3_BUCKET
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AWS_S3_BUCKET
+          - name: AWS_S3_REACH_BUCKET
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AWS_S3_REACH_BUCKET
+          - name: AWS_S3_REACH_FILE
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: AWS_S3_REACH_FILE
+          - name: SIMILAR_WEB_REST_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: SIMILAR_WEB_REST_API_KEY
+          - name: DB_NAME
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: DB_NAME
+          - name: DB_USER
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: DB_USER
+          - name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: DB_PASSWORD
+          - name: DB_HOST
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: DB_HOST
+          - name: DB_PORT
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: DB_PORT
+          - name: E2B_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pr-solution-v2-secret
+                key: E2B_API_KEY
+
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pr-solutions
+  labels:
+    app: pr-solutions
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: pr-solutions
+
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
