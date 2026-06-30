@@ -43,8 +43,7 @@ def charts(
     """Generate chart data from a tagged-articles JSON file stored in S3."""
     try:
         # Default to every dashboard when none are requested.
-        # dashboards = dashboards or [d.value for d in DASHBOARDS_ENUM]
-        dashboards = ["media_monitoring", "media_measurement"]
+        dashboards = dashboards or [d.value for d in DASHBOARDS_ENUM]
         # Fetch workflow details from DB to confirm workflow_id exists and is valid
         record = get_session(db, session_id)
         if record is None:
@@ -376,8 +375,7 @@ async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> 
             return
 
         dashboards = init.get("dashboards") if isinstance(init, dict) else None
-        # dashboards = dashboards or [d.value for d in DASHBOARDS_ENUM]
-        dashboards = ["media_monitoring", "media_measurement"]
+        dashboards = dashboards or [d.value for d in DASHBOARDS_ENUM]
 
         record = get_session(db, session_id)
         if record is None:
