@@ -98,7 +98,7 @@ def get_dashboards_chart_data(dashboards: list[str], tagged_articles, brand_keyw
             final_pr_impact_competitors
         ]
 
-        data_for_insight[DASHBOARDS_ENUM.media_measurement] = {
+        data_for_insight[DASHBOARDS_ENUM.pr_impact] = {
             "share_of_voice": sov,
             "competitive_matrix": competitive_matrix,
             "publication_tier": publication_tier,
