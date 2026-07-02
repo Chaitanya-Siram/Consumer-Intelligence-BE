@@ -315,7 +315,7 @@ def build_media_monitoring_report(
 
             # Summary / content. Similar coverage (if any) is appended to this
             # same paragraph as a trailing sentence — not a separate paragraph.
-            content = art.get("content") or art.get("summary") or ""
+            content = art.get("summary") or art.get("content") or ""
             similar = art.get("similar_articles") or {}
             similar = similar if isinstance(similar, dict) else {}
 

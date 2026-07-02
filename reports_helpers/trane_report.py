@@ -338,7 +338,7 @@ def build_media_monitoring_report(
             _tight(lp, space_before=0, space_after=8)
             _add_run(lp, "Summary: ", bold=True)
 
-            content = art.get("content") or art.get("summary") or ""
+            content = art.get("summary") or art.get("content") or ""
             if content:
                 cp = blk.add_paragraph()
                 _tight(cp, space_before=0, space_after=8)

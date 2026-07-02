@@ -13,6 +13,7 @@ class TaggedArticleUpdate(BaseModel):
     id: str
     sentiment: Optional[str] = None
     theme: Optional[str] = None
+    summary: Optional[str] = None
     sentiment_confidence: Optional[float] = Field(default=None, ge=0, le=100)  # 0–100 percent; stored as a 0–1 float
     theme_confidence: Optional[float] = Field(default=None, ge=0, le=100)
     section_category_confidence: Optional[float] = Field(default=None, ge=0, le=100)
@@ -45,6 +46,7 @@ class NewTaggedArticle(BaseModel):
     reach: Optional[int] = None
     sentiment: Optional[str] = None
     theme: Optional[str] = None
+    summary: Optional[str] = None
     sentiment_confidence: Optional[float] = Field(default=None, ge=0, le=100)
     theme_confidence: Optional[float] = Field(default=None, ge=0, le=100)
     section_category_confidence: Optional[float] = Field(default=None, ge=0, le=100)

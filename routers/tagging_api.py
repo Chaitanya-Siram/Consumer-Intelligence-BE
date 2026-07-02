@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
 from ai_helpers.llm_service import tag_articles, tag_articles_streaming
-from ai_helpers.tagging_common import merge_tagged_with_articles
+from ai_helpers.tagging_common import merge_tagged_with_articles, merge_tagged_with_syndication
 from ai_helpers.article_linker import link_articles
 from configs import logger
 from data_source_helpers.fetching_service import fetch_articles_and_save
@@ -74,19 +74,26 @@ def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
         # fetched reaches are written back to the S3 reach file in the background.
         articles = get_reach(articles)
 
+        # Link related articles BEFORE tagging so we can skip syndicated copies —
+        # they inherit their main article's tags, so tagging them just wastes
+        # tokens. Tag only mains + similar (everything that isn't a syndicated copy).
+        articles = link_articles(articles)
+        to_tag = [a for a in articles if not a.get("syndication_of")]
+        copies = [a for a in articles if a.get("syndication_of")]
+        copy_to_main = {a["id"]: a.get("syndication_of", "") for a in copies}
+        logger.info(f"Tagging {len(to_tag)} articles; {len(copies)} syndicated copies inherit their main's tags")
+
         logger.info(f"Running AI tagging")
         started = time.time()
         tagged = tag_articles(articles, brand_keywords, competitor_keywords, sections_prompt=sections_prompt)
         logger.info(f"Tagging completed in {time.time() - started:.1f}s")
         
-        # Merging the tagged fields with original fields
-        tagged_full = merge_tagged_with_articles(articles, tagged)
+        # Merge tags onto the tagged articles, then attach the syndicated copies
+        # with their main article's tags copied over.
+        tagged_full = merge_tagged_with_syndication(to_tag, copies, copy_to_main, tagged)
 
         # Reorder by Confidence and Reassign Id
         final_articles = reorder_by_confidence(tagged_full)
-
-        # Link syndicated copies and same-story articles (uses the final ids).
-        final_articles = link_articles(final_articles)
 
         # Uploading tagged articles to S3 JSON file
         name, _ext = os.path.splitext(source_file)
@@ -197,6 +204,17 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
 
         await websocket.send_json({"type": "start", "total_articles": len(articles)})
 
+        # Link related articles BEFORE tagging so we can skip syndicated copies —
+        # they inherit their main article's tags, so tagging them just wastes
+        # tokens. link_articles sets syndication_of / similar_of on each article;
+        # we tag only mains + similar (everything that isn't a syndicated copy).
+        await websocket.send_json({"type": "progress", "message": "Linking related articles…"})
+        articles = await asyncio.to_thread(link_articles, articles)
+        to_tag = [a for a in articles if not a.get("syndication_of")]
+        syndications = [a for a in articles if a.get("syndication_of")]
+        syndications_to_main = {a["id"]: a.get("syndication_of", "") for a in syndications}
+        logger.info(f"Tagging {len(to_tag)} articles; {len(syndications)} syndicated copies inherit their main's tags")
+
         # Bridge the synchronous on_batch_done callback (invoked from worker
         # threads) into this async handler via a queue. A sentinel marks the end.
         loop = asyncio.get_running_loop()
@@ -211,7 +229,7 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
         task = asyncio.create_task(
             asyncio.to_thread(
                 tag_articles_streaming,
-                articles,
+                to_tag,
                 brand_keywords,
                 competitor_keywords,
                 sections_prompt,
@@ -231,10 +249,12 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
         tagged = await task  # re-raise any exception from the tagging thread
         logger.info(f"Tagging completed in {time.time() - started:.1f}s")
 
-        # Merging the tagged fields with original fields
-        tagged_full = merge_tagged_with_articles(articles, tagged)
+        # Merge tags onto the tagged articles, then attach the syndicated copies
+        # with their main article's tags copied over.
+        tagged_full = merge_tagged_with_syndication(to_tag, syndications, syndications_to_main, tagged)
 
-        # Reorder by Confidence and Reassign Id
+        # Reorder by Confidence and Reassign Id. reorder_by_confidence remaps the
+        # syndication_of / similar_of pointers (set above) onto the new ids.
         final_articles = reorder_by_confidence(tagged_full)
 
         # Link syndicated copies and same-story articles (uses the final ids).

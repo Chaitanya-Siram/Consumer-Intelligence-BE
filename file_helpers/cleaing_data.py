@@ -122,8 +122,21 @@ def reorder_by_confidence(records: list[dict[str, Any]]) -> list[dict[str, Any]]
         reverse=True,
     )
 
+    # Reassign ids, tracking old→new so any relation pointers (set before this
+    # reorder, e.g. by link_articles running pre-tagging) still resolve correctly.
+    id_map: dict[str, str] = {}
     result: list[dict[str, Any]] = []
     for i, record in enumerate(ordered, start=1):
-        result.append({**record, "id": f"A{i}"})
+        new_id = f"A{i}"
+        old_id = record.get("id")
+        if old_id is not None:
+            id_map[old_id] = new_id
+        result.append({**record, "id": new_id})
+
+    for record in result:
+        for field in ("syndication_of", "similar_of"):
+            ref = record.get(field)
+            if ref:
+                record[field] = id_map.get(ref, "")
     return result
 

@@ -22,6 +22,14 @@ Aspect-based toward the brand of interest only — ignore overall article tone a
 **THEME:**
 The primary topic category the article is about. Be specific and concise (2-5 words), e.g. 'Product Performance', 'Innovation', 'Regulatory Action', 'Leadership Change'. Avoid generic labels like 'news', 'social media', or 'other'.
 
+**SUMMARY:**
+A concise, neutral 2-3 sentence summary of the article ITSELF — a plain summary of what the article reports.
+- Write plain factual prose. NEVER use the words "the article" or "this article" ANYWHERE in the summary — not at the start, not in the middle. Just state the facts directly.
+- Summarize ONLY the article's own content. Do NOT add any meta-commentary about what is or isn't in the article — e.g. do NOT write sentences like "No specific company or brand is cited", "No brand is mentioned", "The brand of interest is not mentioned", or "no connection to the brand is established". Simply omit anything that isn't there; never point out its absence.
+- Do NOT mention the brand of interest's relevance or whether any brand/company is named. Relevancy is handled separately by the relevancy fields — keep it out of the summary entirely.
+- Summary should be written in AP style and be suitable for a corporate communications leader.
+- Capture key points, including statements by spokespersons, CEOs, executives, or leaders where present.
+
 **CONFIDENCE SCORES (each 0-1):**
 Provide three separate confidence scores:
 - sentiment_confidence: confidence in the SENTIMENT classification. Lower it when the brand is barely mentioned or sentiment cues are ambiguous.

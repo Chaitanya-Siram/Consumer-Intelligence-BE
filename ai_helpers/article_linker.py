@@ -121,10 +121,17 @@ _SIMILAR_INSTRUCTION = (
 )
 
 
-def _link_similar(reps: list[dict]) -> None:
+def _link_similar(reps: list[dict], main_ids: set[str] | None = None) -> None:
     """Ask the LLM to cluster same-meaning articles among the representatives, then
-    point each cluster's later articles at the earliest one. Best-effort: any
-    failure leaves similar_of blank."""
+    point each cluster's later articles at the primary one. Best-effort: any
+    failure leaves similar_of blank.
+
+    `main_ids` are the ids of syndication mains (articles that already own
+    syndicated copies). A main must stay the primary of its similar cluster —
+    otherwise it would become a `similar_of` child of another article while still
+    owning its syndicated copies. So a main is preferred as primary over the plain
+    earliest-by-date pick."""
+    main_ids = main_ids or set()
     candidates = [a for a in reps if (a.get("title") or a.get("content"))]
     if len(candidates) < 2:
         return
@@ -148,7 +155,10 @@ def _link_similar(reps: list[dict]) -> None:
         if len(member_ids) < 2:
             continue
         members = [by_id[i] for i in member_ids]
-        primary = _earliest(members)
+        # Prefer a syndication main as the primary; among several, the earliest;
+        # otherwise the earliest overall.
+        mains = [m for m in members if m["id"] in main_ids]
+        primary = _earliest(mains if mains else members)
         for m in members:
             if m["id"] != primary["id"]:
                 m["similar_of"] = primary["id"]
@@ -165,13 +175,17 @@ def link_articles(articles: list[dict]) -> list[dict]:
         a.setdefault("syndication_of", "")
         a.setdefault("similar_of", "")
 
-    copies = _link_syndication(items)
+    syndicates = _link_syndication(items)
 
-    # Cluster only the non-copies — a copy is already represented by its primary.
-    reps = [a for a in items if a["id"] not in copies]
+    # Ids of syndication mains (articles that own copies) — they must remain the
+    # primary of any similar cluster they fall into.
+    main_ids = {a["syndication_of"] for a in items if a.get("syndication_of")}
+
+    # Cluster only the main articles.
+    reps = [a for a in items if a["id"] not in syndicates]
     try:
-        _link_similar(reps)
-    except Exception:  # noqa: BLE001
+        _link_similar(reps, main_ids)
+    except Exception:
         logger.exception("Similar-article clustering failed; leaving similar_of blank")
 
     return articles

@@ -142,10 +142,11 @@ def get_reach(articles: list[dict[str, str]]) -> list[dict]:
     for article in articles:
         domain = article.get('domain')
         if domain and domain not in reach_dict:
-            reach = int(fetch_similarweb_reach(domain))
-            article['reach'] = reach
-            reach_dict[domain] = reach          # cache within this run
-            new_reach[domain] = reach           # queue for the S3 write-back
+            # reach = int(fetch_similarweb_reach(domain))
+            # article['reach'] = reach
+            # reach_dict[domain] = reach          # cache within this run
+            # new_reach[domain] = reach           # queue for the S3 write-back
+            article['reach'] = 0
         elif domain:
             article['reach'] = int(reach_dict[domain]) if reach_dict[domain] is not None else 0
         else:

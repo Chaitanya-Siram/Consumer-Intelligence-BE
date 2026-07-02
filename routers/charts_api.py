@@ -57,6 +57,13 @@ def charts(
         if tagged_file is None:
             raise HTTPException(status_code=404, detail=f"Not processed yet, run the tagging agent")
         
+        if record.workflow:
+            dashboards = list[str]
+            for node in record.workflow.get("nodes"):
+                if node.get("type") == "analysis" and node.get("data", {}).get("lens"):
+                    dashboards.append(node["data"]["lens"])
+            dashboards = list(set(dashboards))
+        
         brand_keywords = record.brand_keywords
         competitor_keywords = record.competitor_keywords
         message_keywords = record.message_keywords
@@ -398,6 +405,13 @@ async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> 
         if tagged_file is None:
             await websocket.send_json({"type": "error", "detail": "Not processed yet, run the tagging agent"})
             return
+        
+        if record.workflow:
+            dashboards = []
+            for node in record.workflow.get("nodes"):
+                if node.get("type") == "analysis" and node.get("data", {}).get("lens"):
+                    dashboards.append(node["data"]["lens"])
+            dashboards = list(set(dashboards))
 
         brand_keywords = record.brand_keywords
         competitor_keywords = record.competitor_keywords
