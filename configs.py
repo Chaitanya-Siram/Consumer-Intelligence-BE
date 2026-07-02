@@ -82,6 +82,7 @@ class Configs:
     DB_NAME = os.environ.get('DB_NAME')
     DB_USER = os.environ.get('DB_USER')
     DB_PASSWORD = os.environ.get('DB_PASSWORD')
+    DB_SCHEMA = os.environ.get('DB_SCHEMA', 'pr_solution')
 
     # Warn about missing critical configuration variables
     required_vars = {
