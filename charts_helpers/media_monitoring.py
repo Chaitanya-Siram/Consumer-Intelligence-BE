@@ -67,6 +67,7 @@ def media_monitoring_charts(data, sections_orders=None):
             "id": item.get("id"),
             "title": item.get("title"),
             "content": item.get("content"),
+            "summary": item.get("summary"),
             "sentiment": item.get("sentiment"),
             "date": item.get("date"),
             "url": item.get("url"),

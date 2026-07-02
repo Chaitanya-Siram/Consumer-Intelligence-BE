@@ -214,7 +214,7 @@ def _mention_note(article, keywords):
 def _summary_paragraphs(article):
     """Split an article's summary/content into display paragraphs (blank lines or
     single newlines start a new paragraph), preserving the reference's bulleted feel."""
-    content = article.get("content") or article.get("summary") or ""
+    content = article.get("summary") or article.get("content") or ""
     content = str(content).strip()
     if not content:
         return []

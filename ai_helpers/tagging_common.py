@@ -57,6 +57,10 @@ def build_tag_tool_parameters(brand_keywords: list[str], sections_prompt: str | 
                             "description": f"Sentiment toward {brand_name} only.",
                         },
                         "theme": {"type": "string", "description": "Concise 2-5 word theme label."},
+                        "summary": {
+                            "type": "string",
+                            "description": "A concise, neutral 2-3 sentence plain summary of the article's own key points. Summarize ONLY what the article reports. Never use the words 'the article' or 'this article' anywhere. Do NOT add meta-commentary about the presence or absence of any brand/company (e.g. 'No specific company or brand is cited') — simply omit what isn't there; never point out its absence.",
+                        },
                         "sentiment_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence (0-1) in the sentiment classification."},
                         "theme_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence (0-1) in the theme classification."},
                         "section_category_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence (0-1) in the section category assignment."},
@@ -110,7 +114,7 @@ def build_tag_tool_parameters(brand_keywords: list[str], sections_prompt: str | 
                         }
                     },
                     "required": [
-                        "id", "sentiment", "theme",
+                        "id", "sentiment", "theme", "summary",
                         "sentiment_confidence", "theme_confidence", "section_category_confidence",
                         "relevancy_confidence", "relevancy_reason",
                         "xai_theme_reason", "xai_sentiment_reason",
@@ -180,7 +184,7 @@ class FieldConfigs:
 
 FIELDS_CONFIG = FieldConfigs(
     fields=[
-        "id", "sentiment", "theme",
+        "id", "sentiment", "theme", "summary",
         "sentiment_confidence", "theme_confidence", "section_category_confidence",
         "relevancy_confidence", "relevancy_reason",
         "xai_theme_reason", "xai_sentiment_reason", "priority_watch", "section",
@@ -433,6 +437,33 @@ def run_in_batches(
     return out
 
 
+def merge_tagged_with_syndication(
+    to_tag: list[dict[str, Any]],
+    syndications: list[dict[str, Any]],
+    syndications_to_main: dict[str, str],
+    tagged: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge tags for the actually-tagged (non-copy) articles, then attach each
+    syndicated copy with its MAIN article's tags copied over.
+
+    Syndicated copies are never sent to the model (to save tokens); they share
+    their main article's classification. `copy_to_main` maps each copy id to its
+    main id (from article_linker.split_syndicated). Copies keep their own metadata
+    (url, date, source, reach…) but take the main's tag fields."""
+    merged = merge_tagged_with_articles(to_tag, tagged)
+
+    tagged_by_id = {t["id"]: t for t in tagged if isinstance(t, dict) and t.get("id") is not None}
+    # A per-copy tagging dict = the main's tags but keyed by the copy's own id, so
+    # merge_tagged_with_articles attaches them to the right article.
+    copy_taggings: list[dict[str, Any]] = []
+    for c in syndications:
+        main_tag = tagged_by_id.get(syndications_to_main.get(c.get("id"), ""))
+        if main_tag:
+            copy_taggings.append({**main_tag, "id": c.get("id")})
+    merged += merge_tagged_with_articles(syndications, copy_taggings)
+    return merged
+
+
 def merge_tagged_with_articles(articles: list[dict[str, Any]], tagged: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge tagging output back onto the source articles, dropping article_text."""
     tagged_dict = {t["id"]: t for t in tagged if t.get("id") is not None}
@@ -443,7 +474,7 @@ def merge_tagged_with_articles(articles: list[dict[str, Any]], tagged: list[dict
         if aid in tagged_dict:
             out.append({**article_meta, **tagged_dict[aid]})
         else:
-            out.append({**article_meta, "sentiment": None, "theme": None, "reason": None,
+            out.append({**article_meta, "summary": None, "sentiment": None, "theme": None, "reason": None,
                         "sentiment_confidence": None, "theme_confidence": None, "section_category_confidence": None,
                         "relevancy_confidence": None, "relevancy_reason": None})
     return out
