@@ -91,6 +91,7 @@ def update_session_status(db: Session, session: SessionModel, status: str) -> Se
 def update_session_workflow(db: Session, session: SessionModel, workflow: Any | None) -> SessionModel:
     """Persist the visual pipeline graph (nodes + edges) for a session."""
     session.workflow = workflow
+    session.status = "Workflow Saved"
     db.commit()
     db.refresh(session)
     return session
