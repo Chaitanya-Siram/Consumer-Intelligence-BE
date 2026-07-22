@@ -19,7 +19,15 @@ from data_source_helpers.feedparser_helper import fetch_google_news_feedparser
 from data_source_helpers.serp_api_helper import fetch_google_news_for_queries
 from db_helpers.models.session_model import SessionModel
 from db_helpers.repository.sessions_db import update_session_source_file
+from file_helpers.file_parser import parse_upload
 from file_helpers.s3_file import s3_file
+
+# Google News is the only RSS source the workflow data node currently offers.
+GOOGLE_NEWS_SOURCE = "google_news"
+# Infix used in the key of source files we materialize from a workflow RSS fetch.
+# Presence of this marker means the fetch already ran for this session, so a
+# re-tag reads the merged file instead of fetching + merging again.
+_RSS_MERGED_INFIX = "rss_merged"
 
 
 def _flatten_session_queries(queries: Any) -> list[dict[str, str]]:
@@ -97,4 +105,112 @@ def fetch_articles_and_save(
 
     updated = update_session_source_file(db, session, file_key)
     logger.info(f"Saved {len(records)} fetched article(s) to key='{file_key}' for session id={session.id}")
+    return updated
+
+
+def _extract_workflow_rss_queries(session: SessionModel) -> list[str]:
+    """Pull the Google News RSS queries configured on the workflow's Data node.
+
+    Returns the (trimmed, de-duped) query strings only when the Data node has
+    `google_news` among its `api.sources` and at least one query; otherwise [].
+    """
+    workflow = session.workflow if isinstance(session.workflow, dict) else {}
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("type") != "data":
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        api = data.get("api") if isinstance(data.get("api"), dict) else {}
+        sources = api.get("sources") if isinstance(api.get("sources"), list) else []
+        queries = api.get("queries") if isinstance(api.get("queries"), list) else []
+        if GOOGLE_NEWS_SOURCE not in sources:
+            return []
+
+        seen: set[str] = set()
+        result: list[str] = []
+        for q in queries:
+            q = str(q or "").strip()
+            if q and q.lower() not in seen:
+                seen.add(q.lower())
+                result.append(q)
+        return result
+
+    return []
+
+
+def _rss_already_materialized(session: SessionModel) -> bool:
+    """True if this session's source_file is one we previously built from an RSS
+    fetch — so a re-tag reads it as-is instead of fetching + merging again."""
+    key = session.source_file or ""
+    return _RSS_MERGED_INFIX in key.rsplit("/", 1)[-1]
+
+
+def fetch_and_merge_workflow_rss(
+    session: SessionModel,
+    db: Session,
+) -> SessionModel:
+    """Materialize the workflow Data node's Google News RSS request into the
+    session's source file.
+
+    When the Data node asks for `google_news` + queries: fetch and clean those
+    articles, then either MERGE them into the records of the already-uploaded
+    source file, or — when no file was uploaded — save them as a NEW source file.
+    Either way the session's `source_file` ends up pointing at a single JSON file
+    that the tagging pipeline reads unchanged.
+
+    No-ops (returns the session untouched) when the Data node has no RSS request,
+    when nothing could be fetched, or when a prior run already materialized it.
+    """
+    queries = _extract_workflow_rss_queries(session)
+    if not queries:
+        return session
+
+    # if _rss_already_materialized(session):
+    #     logger.info(
+    #         f"Session id={session.id} already has an RSS-merged source file; skipping re-fetch."
+    #     )
+    #     return session
+
+    logger.info(f"Workflow RSS fetch for session id={session.id}: {len(queries)} query/queries")
+    rss_articles = fetch_google_news_feedparser(queries)
+    if not rss_articles:
+        logger.warning(
+            f"No RSS articles fetched for session id={session.id}; leaving source file unchanged."
+        )
+        return session
+    rss_records = [_to_source_record(a) for a in rss_articles]
+
+    # Merge into the uploaded file's records when one is present; otherwise the
+    # RSS records stand alone as a brand-new source file.
+    base_records: list[dict[str, Any]] = []
+    if session.source_file:
+        try:
+            existing = parse_upload(session.source_file, s3_file.download_file(session.source_file))
+            if isinstance(existing, list):
+                base_records = existing
+        except Exception as e:
+            logger.exception(
+                f"Could not read existing source file {session.source_file!r} for session "
+                f"id={session.id}; writing an RSS-only file instead: {e}"
+            )
+
+    merged_records = base_records + rss_records
+    body = json.dumps(merged_records, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    file_key = (
+        f"session_files/session_{session.id}/{current_date}/"
+        f"raw_{_RSS_MERGED_INFIX}_{int(time.time())}.json"
+    )
+    s3_file.upload_file(file_key, body)
+
+    updated = update_session_source_file(db, session, file_key)
+    logger.info(
+        f"Saved {len(merged_records)} record(s) "
+        f"({len(base_records)} file + {len(rss_records)} RSS) to key='{file_key}' "
+        f"for session id={session.id}"
+    )
     return updated

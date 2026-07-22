@@ -10,7 +10,7 @@ from ai_helpers.llm_service import tag_articles, tag_articles_streaming
 from ai_helpers.tagging_common import merge_tagged_with_articles, merge_tagged_with_syndication
 from ai_helpers.article_linker import link_articles
 from configs import logger
-from data_source_helpers.fetching_service import fetch_articles_and_save
+from data_source_helpers.fetching_service import fetch_articles_and_save, fetch_and_merge_workflow_rss
 from data_source_helpers.newspaper_helper import article_content_fetch
 from db_helpers.models.session_model import SessionType
 from db_helpers.repository.sessions_db import (
@@ -46,6 +46,13 @@ def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Workflow not found.")
+
+        # Workflow Data node may request Google News RSS (source google_news +
+        # queries). Fetch + merge into the uploaded file, or create a new source
+        # file when none was uploaded. No-op when no RSS request is configured.
+        if record.session_type != SessionType.QUERY:
+            record = fetch_and_merge_workflow_rss(record, db)
+
         if not record.source_file:
             raise HTTPException(status_code=400, detail="Workflow has no source_file set.")
 
@@ -168,6 +175,12 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
             # SerpAPI calls are blocking — run off the event loop so the socket stays responsive.
             record = await asyncio.to_thread(fetch_articles_and_save, record, db)
             await websocket.send_json({"type": "progress", "message": "Fetched articles — preparing to tag…"})
+        else:
+            # Workflow Data node may request Google News RSS (source google_news +
+            # queries). Fetch + merge into the uploaded file, or create a new source
+            # file when none was uploaded. No-op when no RSS request is configured.
+            await websocket.send_json({"type": "progress", "message": "Fetching Google News RSS feed…"})
+            record = await asyncio.to_thread(fetch_and_merge_workflow_rss, record, db)
 
         if not record.source_file:
             await websocket.send_json({"type": "error", "detail": "Workflow has no source_file set."})
