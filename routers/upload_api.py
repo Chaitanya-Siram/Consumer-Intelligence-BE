@@ -20,6 +20,17 @@ class UploadResponse(BaseModel):
     record_count: int
 
 
+class CreateSessionRequest(BaseModel):
+    project_id: int
+    brand_keywords: list[str]
+    competitor_keywords: list[str] = []
+    message_keywords: list[str]
+
+
+class CreateSessionResponse(BaseModel):
+    session_id: int
+
+
 @router.post("/upload", response_model=UploadResponse)
 def upload(
     project_id: int = Form(..., description="ID of the project this upload belongs to."),
@@ -64,3 +75,32 @@ def upload(
 
     logger.info(f"Uploaded {len(records)} records to key='{file_key}'")
     return UploadResponse(session_id=session.id, source_file=file_key, record_count=len(records))
+
+
+@router.post("/session", response_model=CreateSessionResponse)
+def create_session_no_file(
+    payload: CreateSessionRequest,
+    db: Session = Depends(get_db),
+) -> CreateSessionResponse:
+    """Create a session without uploading a file.
+
+    Same as /upload but for a source that has no file — e.g. a workflow Data node
+    that pulls articles from a REST API / Google News RSS. No file is parsed or
+    stored, so `source_file` stays empty until the tagging step materializes it
+    (see fetch_and_merge_workflow_rss).
+    """
+    logger.info(f"Creating file-less session for project_id={payload.project_id}")
+
+    if get_project(db, payload.project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    session = create_session(
+        db,
+        payload.project_id,
+        payload.brand_keywords,
+        payload.competitor_keywords,
+        payload.message_keywords,
+    )
+
+    logger.info(f"Created file-less session id={session.id} for project_id={payload.project_id}")
+    return CreateSessionResponse(session_id=session.id)
