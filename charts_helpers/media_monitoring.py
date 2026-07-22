@@ -85,7 +85,8 @@ def media_monitoring_charts(data, sections_orders=None):
         articles.sort(
             key=lambda a: (0 if a.get("priority") else 1, -_reach_int(a))
         )
-        result[section] = articles[:PER_SECTION_LIMIT]
+        # result[section] = articles[:PER_SECTION_LIMIT]
+        result[section] = articles
 
     # Order sections by the project's sections_orders when provided.
     result = apply_section_order(result, sections_orders)
@@ -104,7 +105,7 @@ def media_monitoring_charts(data, sections_orders=None):
     charts_data = ChartResult(
         chart_id="section_articles",
         title="Top Articles by Section",
-        description="Top 20 articles per media-monitoring section, with priority-watch items first, then ordered by reach.",
+        description="Articles per media-monitoring section, with priority-watch items first, then ordered by reach.",
         chart_type="table",
         data=result,
         series=[],
