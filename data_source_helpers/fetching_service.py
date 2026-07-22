@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 from sqlalchemy.orm import Session
 from configs import logger
-from data_source_helpers.feedparser_helper import fetch_google_news_feedparser
+from data_source_helpers.feedparser_helper import fetch_google_news_feedparser_boolean_query
 from data_source_helpers.serp_api_helper import fetch_google_news_for_queries
 from db_helpers.models.session_model import SessionModel
 from db_helpers.repository.sessions_db import update_session_source_file
@@ -73,7 +73,7 @@ def fetch_articles_and_save(
     max_results_per_query: int = 50,
     language: str = "en",
     country: str = "us",
-    when: str = "7d",
+    when: str = "1d",
 ) -> SessionModel:
     """Fetch articles from SerpAPI for all of the session's queries and save them as
     a single JSON source file on S3, then point the session's source_file at it.
@@ -86,7 +86,7 @@ def fetch_articles_and_save(
         raise ValueError("Session has no queries to fetch articles for.")
 
     logger.info(f"Fetching SerpAPI articles for session id={session.id}: {len(flat)} query/queries")
-    articles = fetch_google_news_feedparser(
+    articles = fetch_google_news_feedparser_boolean_query(
         flat,
         max_results_per_query=max_results_per_query,
         language=language,
@@ -175,7 +175,7 @@ def fetch_and_merge_workflow_rss(
     #     return session
 
     logger.info(f"Workflow RSS fetch for session id={session.id}: {len(queries)} query/queries")
-    rss_articles = fetch_google_news_feedparser(queries)
+    rss_articles = fetch_google_news_feedparser_boolean_query(queries)
     if not rss_articles:
         logger.warning(
             f"No RSS articles fetched for session id={session.id}; leaving source file unchanged."
