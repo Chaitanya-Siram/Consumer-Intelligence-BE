@@ -100,7 +100,8 @@ def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
         tagged_full = merge_tagged_with_syndication(to_tag, copies, copy_to_main, tagged)
 
         # Reorder by Confidence and Reassign Id
-        final_articles = reorder_by_confidence(tagged_full)
+        # final_articles = reorder_by_confidence(tagged_full)
+        final_articles = tagged_full
 
         # Uploading tagged articles to S3 JSON file
         name, _ext = os.path.splitext(source_file)
@@ -268,11 +269,12 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
 
         # Reorder by Confidence and Reassign Id. reorder_by_confidence remaps the
         # syndication_of / similar_of pointers (set above) onto the new ids.
-        final_articles = reorder_by_confidence(tagged_full)
+        # final_articles = reorder_by_confidence(tagged_full)
+        final_articles = tagged_full
 
         # Link syndicated copies and same-story articles (uses the final ids).
-        await websocket.send_json({"type": "progress", "message": "Linking related articles…"})
-        final_articles = await asyncio.to_thread(link_articles, final_articles)
+        # await websocket.send_json({"type": "progress", "message": "Linking related articles…"})
+        # final_articles = await asyncio.to_thread(link_articles, final_articles)
 
         # Uploading tagged articles to S3 JSON file
         name, _ext = os.path.splitext(source_file)
