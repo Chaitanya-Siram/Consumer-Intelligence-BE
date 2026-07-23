@@ -127,7 +127,7 @@ def call_feedparser_google_news_rss_query(full_query: str, when: Optional[str] =
             futures = [pool.submit(article_content_fetch, a) for a in results]
             for fut in as_completed(futures):
                 articles.append(fut.result())
-        return articles
+        return filter_recent_articles(articles)
     except Exception as e:
         logger.exception(f"Feedparser fetch failed for query {full_query!r}: {e}")
         return []

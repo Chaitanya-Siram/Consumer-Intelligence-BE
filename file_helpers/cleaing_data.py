@@ -14,7 +14,10 @@ DATE_FORMATS = (
     "%m/%d/%Y, %I:%M %p UTC",
     "%m/%d/%Y, %I:%M %p",
     "%m/%d/%Y",
-    "%a, %d %b %Y %H:%M:%S %Z",  # RFC 1123, e.g. "Thu, 11 Jun 2026 20:23:37 GMT"
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%a, %d %b %Y %H:%M:%S %Z",
 )
 
 def _to_iso_date(raw: Any) -> str:
