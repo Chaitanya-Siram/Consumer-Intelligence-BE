@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from configs import logger
 from db_helpers.database import get_db
-from db_helpers.models.session_model import SessionResponse
+from db_helpers.models.session_model import SessionResponse, SessionType
 from db_helpers.repository.projects_db import get_project
 from db_helpers.repository.sessions_db import (
     delete_session,
@@ -43,7 +43,17 @@ def save_workflow(session_id: int, payload: WorkflowUpdate, db: Session = Depend
     session = get_session(db, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found.")
-    session = update_session_workflow(db, session, payload.workflow)
+
+    session_type = session.session_type
+    for node in payload.workflow.get("nodes", []):
+        if ( node.get("type") == "data" 
+            and node.get("data", {}).get("api", {}).get("sources", [""])[0] == "google_news"
+            and len(node.get("data", {}).get("api", {}).get("queries", [])) > 0
+        ):
+            session_type = SessionType.QUERY
+            break
+    
+    session = update_session_workflow(db, session, payload.workflow, session_type)
     logger.info(f"Saved workflow for session id={session_id}")
     return session
 

@@ -166,7 +166,7 @@ def fetch_and_merge_workflow_rss(
     """
     queries = _extract_workflow_rss_queries(session)
     if not queries:
-        return session
+        return session, False
 
     # if _rss_already_materialized(session):
     #     logger.info(
@@ -180,22 +180,22 @@ def fetch_and_merge_workflow_rss(
         logger.warning(
             f"No RSS articles fetched for session id={session.id}; leaving source file unchanged."
         )
-        return session
+        return session, False
     rss_records = [_to_source_record(a) for a in rss_articles]
 
     # Merge into the uploaded file's records when one is present; otherwise the
     # RSS records stand alone as a brand-new source file.
     base_records: list[dict[str, Any]] = []
-    if session.source_file:
-        try:
-            existing = parse_upload(session.source_file, s3_file.download_file(session.source_file))
-            if isinstance(existing, list):
-                base_records = existing
-        except Exception as e:
-            logger.exception(
-                f"Could not read existing source file {session.source_file!r} for session "
-                f"id={session.id}; writing an RSS-only file instead: {e}"
-            )
+    # if session.source_file:
+    #     try:
+    #         existing = parse_upload(session.source_file, s3_file.download_file(session.source_file))
+    #         if isinstance(existing, list):
+    #             base_records = existing
+    #     except Exception as e:
+    #         logger.exception(
+    #             f"Could not read existing source file {session.source_file!r} for session "
+    #             f"id={session.id}; writing an RSS-only file instead: {e}"
+    #         )
 
     merged_records = base_records + rss_records
     body = json.dumps(merged_records, ensure_ascii=False, indent=2, default=str).encode("utf-8")
@@ -213,4 +213,4 @@ def fetch_and_merge_workflow_rss(
         f"({len(base_records)} file + {len(rss_records)} RSS) to key='{file_key}' "
         f"for session id={session.id}"
     )
-    return updated
+    return updated, True
