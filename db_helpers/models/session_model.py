@@ -10,7 +10,8 @@ from db_helpers.mutable_json import NestedMutableDict
 class SessionType(str, enum.Enum):
     """How a session was created."""
     UPLOAD = "upload"   # from an uploaded file
-    QUERY = "query"     # from the query-builder agent
+    QUERY = "query"     # only from query
+    UPLOAD_AND_QUERY = "upload_and_query"  # from an uploaded file and query
 
 
 class SessionModel(Base):
