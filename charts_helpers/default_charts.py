@@ -749,7 +749,7 @@ class ChartCalulations:
         reach_by_brand: dict[str, int] = defaultdict(int)
 
         for item in data:
-            full_text = item.get("title", "") + " " + item.get("content", "")
+            full_text = (item.get("title") or"") + " " + (item.get("content") or "")
             sentiment = item.get("sentiment")
             if sentiment not in ["POS", "NEG", "NEU"]:
                 continue
@@ -810,7 +810,7 @@ class ChartCalulations:
             brand_data = {"total": 0, "actual_score": 0, "sentiments": {"POS": 0, "NEG": 0, "NEU": 0}, "reach": 0}
             datewise_data = defaultdict(lambda: {"total": 0, "actual_score": 0})
             for article in data:
-                full_text = article.get("title", "") + " " + article.get("content", "")
+                full_text = (article.get("title") or "") + " " + (article.get("content") or "")
                 if brand in article.get("brand_of_interest", []) or brand in article.get("competitors", []) or brand in full_text:
                     brand_data["total"] += 1
                     date = article.get("date")[:10]
@@ -893,7 +893,7 @@ class ChartCalulations:
         distribution: dict[str, dict[str, int]] = {brand: defaultdict(int) for brand in all_brands}
 
         for item in data:
-            full_text = item.get("title", "") + " " + item.get("content", "")
+            full_text = (item.get("title") or "") + " " + (item.get("content") or "")
             publication = item.get("domain_name")
             if not publication:
                 continue
