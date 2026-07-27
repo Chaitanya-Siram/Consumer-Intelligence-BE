@@ -130,6 +130,11 @@ spec:
               secretKeyRef:
                 name: pr-solution-v2-secret
                 key: E2B_API_KEY
+          - name: JWT_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: ai-solutions-secret
+                key: JWT_SECRET_KEY
 
 status: {}
 

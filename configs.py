@@ -84,6 +84,12 @@ class Configs:
     DB_PASSWORD = os.environ.get('DB_PASSWORD')
     DB_SCHEMA = os.environ.get('DB_SCHEMA', 'pr_solution')
 
+    # Authentication / JWT configuration
+    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
+    JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+    REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+
     # Warn about missing critical configuration variables
     required_vars = {
         "LLM_PROVIDER": LLM_PROVIDER,

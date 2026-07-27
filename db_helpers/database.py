@@ -30,6 +30,12 @@ def init_db() -> None:
     before create_all runs. Safe to call repeatedly — create_all is a no-op
     for tables that already exist.
     """
-    from .models import project_model, session_model  # noqa: F401
+    from .models import (
+        project_model,
+        session_model,
+        organization_model,
+        user_model,
+        user_org_mapping_model,
+    )
 
     Base.metadata.create_all(bind=engine)
