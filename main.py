@@ -7,12 +7,13 @@ from exception_handlers import validation_exception_handler
 from db_helpers.database import init_db
 from routers import (
     upload_router, tagging_router, charts_router, agent_router,
-    project_router, session_router, query_builder_router, generated_query_router
+    project_router, session_router, query_builder_router, generated_query_router,
+    auth_router, user_router, organization_router
 )
 
 init_db()
 
-app = FastAPI(title="AI Solutions", version="1.0.0")
+app = FastAPI(title="PR Solutions", version="1.0.0")
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 
@@ -40,3 +41,6 @@ app.include_router(project_router)
 app.include_router(session_router)
 app.include_router(query_builder_router)
 app.include_router(generated_query_router)
+app.include_router(auth_router)
+app.include_router(user_router)
+app.include_router(organization_router)
