@@ -133,7 +133,7 @@ spec:
           - name: JWT_SECRET_KEY
             valueFrom:
               secretKeyRef:
-                name: ai-solutions-secret
+                name: pr-solution-v2-secret
                 key: JWT_SECRET_KEY
 
 status: {}
