@@ -1,6 +1,4 @@
 import asyncio
-import json
-import os
 import re
 import time
 from typing import Any
@@ -18,11 +16,18 @@ from db_helpers.repository.sessions_db import (
     invalidate_session_charts,
     update_session_status,
     update_session_tagged_file,
+    DATA_IN_DB,
+)
+from db_helpers.repository.raw_articles_db import get_raw_articles
+from db_helpers.repository.tagged_articles_db import (
+    delete_tagged_article,
+    get_tagged_articles,
+    replace_tagged_articles,
+    upsert_tagged_article,
 )
 from db_helpers.repository.projects_db import get_project
 from db_helpers.schemas.tagging_schema import ApproveRequest, FetchArticleRequest, NewTaggedArticle, TaggedArticleUpdate
 from file_helpers.cleaing_data import clean_articles, reorder_by_confidence
-from file_helpers.file_parser import parse_upload
 from file_helpers.s3_file import s3_file
 from file_helpers.similare_web_reach import get_reach
 from db_helpers.database import get_db
@@ -38,8 +43,25 @@ _CONFIDENCE_FIELDS = ("sentiment_confidence", "theme_confidence", "section_categ
 _SYNDICATION_CASCADE_FIELDS = ("section", "sentiment", "theme")
 
 
+def _reindex_for_chat(session_id: int, project_id: int | None, articles: list[dict[str, Any]]) -> None:
+    """Purge + re-embed a session's articles into the RAG vector store so chat can
+    search them. Best-effort: a failure here (e.g. RAG deps not installed, model
+    load error) must never fail the tagging pipeline itself."""
+    try:
+        from rag_helpers.ingestion import reingest_session
+
+        count = reingest_session(articles, session_id, project_id)
+        logger.info(f"Reindexed {count} article(s) for chat (session_id={session_id})")
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            f"RAG reindex failed for session_id={session_id}; chat search may be "
+            "stale until the next successful tagging run.",
+            exc_info=True,
+        )
+
+
 @router.post("/tagging/{session_id}")
-def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
+def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Any:
     try:
         logger.info(f"Tagging process started for session_id={session_id}")
 
@@ -60,14 +82,9 @@ def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
 
         update_session_status(db, record, "Tagging")
 
-        source_file = record.source_file
-
-        file_data = s3_file.download_file(source_file)
-        raw = parse_upload(source_file, file_data)
-        if raw is None:
+        raw = get_raw_articles(db, session_id)
+        if not raw:
             raise HTTPException(status_code=404, detail="No data found in Source File")
-        if not isinstance(raw, list):
-            raise HTTPException(status_code=400, detail="Stored payload is not a list of records.")
 
         brand_keywords = record.brand_keywords or []
         competitor_keywords = record.competitor_keywords or []
@@ -105,14 +122,15 @@ def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
         # final_articles = reorder_by_confidence(tagged_full)
         final_articles = tagged_full
 
-        # Uploading tagged articles to S3 JSON file
-        name, _ext = os.path.splitext(source_file)
-        tagged_file_name = f"{name.replace('raw', 'tagged')}.json"
-        s3_file.upload_file(tagged_file_name, json.dumps(final_articles, default=str).encode("utf-8"))
+        # Persist tagged articles to the database (tagged_articles). Drop any stale
+        # cached dashboards for this session.
+        replace_tagged_articles(db, session_id, final_articles)
+        # Embed for chat in the background so the response isn't blocked on it.
+        background_tasks.add_task(_reindex_for_chat, session_id, record.project_id, final_articles)
         if record.charts_data_file:
             s3_file.delete_file(record.charts_data_file)
-        update_session_tagged_file(db, record, tagged_file_name)
-        
+        update_session_tagged_file(db, record, DATA_IN_DB)
+
         return final_articles
     except HTTPException:
         raise
@@ -123,7 +141,7 @@ def tagging(session_id: int, db: Session = Depends(get_db)) -> Any:
 
 
 @router.get("/tagging/{session_id}")
-def get_tagged_articles(session_id: int, db: Session = Depends(get_db)) -> Any:
+def get_tagged_articles_api(session_id: int, db: Session = Depends(get_db)) -> Any:
     try:
         logger.info("")
         logger.info(f"Fetching tagged articles for session_id={session_id}")
@@ -134,9 +152,7 @@ def get_tagged_articles(session_id: int, db: Session = Depends(get_db)) -> Any:
         if not record.tagged_file:
             raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
-        file_data = s3_file.download_file(record.tagged_file)
-        json_data = json.loads(file_data)
-        return json_data
+        return get_tagged_articles(db, session_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -185,16 +201,10 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
             return
 
         update_session_status(db, record, "Tagging")
-        source_file = record.source_file
 
-        file_data = s3_file.download_file(source_file)
-        raw = parse_upload(source_file, file_data)
-        if raw is None:
+        raw = get_raw_articles(db, session_id)
+        if not raw:
             await websocket.send_json({"type": "error", "detail": "No data found in Source File"})
-            update_session_status(db, record, "Failed")
-            return
-        if not isinstance(raw, list):
-            await websocket.send_json({"type": "error", "detail": "Stored payload is not a list of records."})
             update_session_status(db, record, "Failed")
             return
 
@@ -269,20 +279,26 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
         # final_articles = reorder_by_confidence(tagged_full)
         final_articles = tagged_full
 
-        # Link syndicated copies and same-story articles (uses the final ids).
-        # await websocket.send_json({"type": "progress", "message": "Linking related articles…"})
-        # final_articles = await asyncio.to_thread(link_articles, final_articles)
-
-        # Uploading tagged articles to S3 JSON file
-        name, _ext = os.path.splitext(source_file)
-        tagged_file_name = f"{name.replace('raw', 'tagged')}.json"
-        s3_file.upload_file(tagged_file_name, json.dumps(final_articles, default=str).encode("utf-8"))
-        update_session_tagged_file(db, record, tagged_file_name)
+        # Persist tagged articles to the database (tagged_articles). Drop any stale
+        # cached dashboards for this session.
+        replace_tagged_articles(db, session_id, final_articles)
+        # Embed for chat in the background so the client isn't blocked on it; the
+        # task is fire-and-forget (it swallows its own errors and touches no request
+        # state), so tagging completes immediately.
+        asyncio.create_task(
+            asyncio.to_thread(_reindex_for_chat, session_id, record.project_id, final_articles)
+        )
+        if record.charts_data_file:
+            try:
+                s3_file.delete_file(record.charts_data_file)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to delete stale charts file; continuing.")
+        update_session_tagged_file(db, record, DATA_IN_DB)
 
         await websocket.send_json(
             {
                 "type": "complete",
-                "tagged_file": tagged_file_name,
+                "tagged_file": DATA_IN_DB,
                 "total_tagged": len(final_articles),
                 "elapsed_seconds": round(time.time() - started, 1),
             }
@@ -328,10 +344,7 @@ def update_tagged_articles(
         if not record.tagged_file:
             raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
-        file_data = s3_file.download_file(record.tagged_file)
-        articles = json.loads(file_data)
-        if not isinstance(articles, list):
-            raise HTTPException(status_code=400, detail="Stored tagged file is not a list of articles.")
+        articles = get_tagged_articles(db, session_id)
 
         by_id = {a.get("id"): a for a in articles if isinstance(a, dict)}
         # Map each main article id -> its syndicated copies (same story, other domains).
@@ -371,8 +384,11 @@ def update_tagged_articles(
                 detail=f"None of the provided ids exist in the tagged file: {not_found_ids}",
             )
 
-        # Persist the edited file back to the same S3 key.
-        s3_file.upload_file(record.tagged_file, json.dumps(articles, default=str).encode("utf-8"))
+        # Persist only the changed rows (edited targets + cascaded syndication copies).
+        for changed_id in set(updated_ids) | {c for c in cascaded_ids if c}:
+            article = by_id.get(changed_id)
+            if article is not None:
+                upsert_tagged_article(db, session_id, article)
 
         # The tags changed, so any dashboards built from the old tags are stale.
         if record.charts_data_file:
@@ -391,7 +407,7 @@ def update_tagged_articles(
             "updated_ids": updated_ids,
             "cascaded_ids": cascaded_ids,
             "not_found_ids": not_found_ids,
-            "tagged_file": record.tagged_file,
+            "tagged_file": DATA_IN_DB,
         }
     except HTTPException:
         raise
@@ -499,10 +515,7 @@ def add_tagged_articles(
         if not record.tagged_file:
             raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
-        file_data = s3_file.download_file(record.tagged_file)
-        articles = json.loads(file_data)
-        if not isinstance(articles, list):
-            raise HTTPException(status_code=400, detail="Stored tagged file is not a list of articles.")
+        articles = get_tagged_articles(db, session_id)
 
         highest = _highest_article_num(articles)
         created: list[dict] = []
@@ -526,7 +539,9 @@ def add_tagged_articles(
             articles.append(new_article)
             created.append(new_article)
 
-        s3_file.upload_file(record.tagged_file, json.dumps(articles, default=str).encode("utf-8"))
+        # Insert only the newly-added rows.
+        for new_article in created:
+            upsert_tagged_article(db, session_id, new_article)
 
         # Tags changed → cached dashboards are stale.
         if record.charts_data_file:
@@ -560,10 +575,7 @@ def delete_tagged_article(
         if not record.tagged_file:
             raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
-        file_data = s3_file.download_file(record.tagged_file)
-        articles = json.loads(file_data)
-        if not isinstance(articles, list):
-            raise HTTPException(status_code=400, detail="Stored tagged file is not a list of articles.")
+        articles = get_tagged_articles(db, session_id)
 
         target = next((a for a in articles if isinstance(a, dict) and a.get("id") == article_id), None)
         if target is None:
@@ -571,8 +583,7 @@ def delete_tagged_article(
         if (target.get("added_type") or "") != "Manual":
             raise HTTPException(status_code=400, detail="Only manually-added articles can be deleted.")
 
-        articles = [a for a in articles if not (isinstance(a, dict) and a.get("id") == article_id)]
-        s3_file.upload_file(record.tagged_file, json.dumps(articles, default=str).encode("utf-8"))
+        delete_tagged_article(db, session_id, article_id)
 
         # Tags changed → cached dashboards are stale.
         if record.charts_data_file:
@@ -609,27 +620,26 @@ def approve_tagged_articles(
         if not record.tagged_file:
             raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
-        file_data = s3_file.download_file(record.tagged_file)
-        articles = json.loads(file_data)
-        if not isinstance(articles, list):
-            raise HTTPException(status_code=400, detail="Stored tagged file is not a list of articles.")
+        articles = get_tagged_articles(db, session_id)
 
         # Media Monitoring approves into a separate flag so the two review flows
         # don't clobber each other's approvals.
         field = "is_approved_for_monitoring" if payload.for_monitoring else "is_approved"
 
         id_set = set(payload.ids)
-        approved_ids: list[str] = []
+        approved: list[dict] = []
         for a in articles:
             if isinstance(a, dict) and a.get("id") in id_set:
                 a[field] = payload.is_approved
-                approved_ids.append(a.get("id"))
+                approved.append(a)
+        approved_ids = [a.get("id") for a in approved]
 
         not_found_ids = [i for i in payload.ids if i not in set(approved_ids)]
         if not approved_ids:
             raise HTTPException(status_code=404, detail=f"None of the provided ids exist: {not_found_ids}")
 
-        s3_file.upload_file(record.tagged_file, json.dumps(articles, default=str).encode("utf-8"))
+        for a in approved:
+            upsert_tagged_article(db, session_id, a)
         invalidate_session_charts(db, record)
 
         logger.info(f"Set {field}={payload.is_approved} on {len(approved_ids)} article(s) for session_id={session_id}")

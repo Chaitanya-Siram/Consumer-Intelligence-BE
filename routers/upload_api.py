@@ -1,13 +1,11 @@
-import os
-import time
-from datetime import datetime
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 from pydantic import BaseModel
 from configs import logger
-from db_helpers.repository.sessions_db import create_session, update_session_source_file
+from db_helpers.repository.sessions_db import create_session, update_session_source_file, DATA_IN_DB
+from db_helpers.repository.raw_articles_db import replace_raw_articles
+from db_helpers.repository.tagged_articles_db import delete_tagged_articles
 from db_helpers.repository.projects_db import get_project
 from file_helpers.file_parser import parse_upload
-from file_helpers.s3_file import s3_file
 from sqlalchemy.orm import Session
 from db_helpers.database import get_db
 
@@ -64,17 +62,14 @@ def upload(
     
     session = create_session(db, project_id, brand_keywords, competitor_keywords, message_keywords)
 
-    # Upload Original file to S3
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    original_filename = file.filename or ""
-    name, ext = os.path.splitext(original_filename)
-    file_key = f"session_files/session_{session.id}/{current_date}/raw_{name}_{int(time.time())}{ext}"
-    s3_file.upload_file(file_key, file_content)
+    # Store the parsed raw records in the database (raw_articles) instead of the
+    # original file on S3. A fresh source invalidates any prior tagged rows.
+    replace_raw_articles(db, session.id, records)
+    delete_tagged_articles(db, session.id)
+    update_session_source_file(db, session, DATA_IN_DB)
 
-    update_session_source_file(db, session, file_key)
-
-    logger.info(f"Uploaded {len(records)} records to key='{file_key}'")
-    return UploadResponse(session_id=session.id, source_file=file_key, record_count=len(records))
+    logger.info(f"Stored {len(records)} raw records for session_id={session.id}")
+    return UploadResponse(session_id=session.id, source_file=DATA_IN_DB, record_count=len(records))
 
 
 @router.post("/session", response_model=CreateSessionResponse)

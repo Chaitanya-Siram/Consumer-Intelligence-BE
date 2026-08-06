@@ -18,7 +18,6 @@ Message types emitted by the server:
   - {"type": "error",   "detail": str}
 """
 import asyncio
-import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -26,7 +25,6 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
 from agents.chart_generator.chart_agent import (
-    answer_question,
     chart_result_from_data,
     classify_intent,
     failed_chart_result,
@@ -37,26 +35,13 @@ from agents.chart_generator.sandbox import run_chart_code
 from configs import logger
 from db_helpers.database import get_db
 from db_helpers.repository.sessions_db import get_session
-from file_helpers.s3_file import s3_file
+from db_helpers.repository.tagged_articles_db import get_tagged_articles
 
 router = APIRouter(tags=["agent"])
 
 # On a (code) sandbox failure, regenerate the chart code with the error fed back
 # and re-run — up to this many times before giving up on that chart.
 MAX_CODE_RETRIES = 3
-
-
-def _load_json(file_key: str) -> Any:
-    raw = s3_file.download_file(file_key)
-    return json.loads(raw)
-
-
-def _load_json_safe(file_key: str) -> Any | None:
-    try:
-        return _load_json(file_key)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Failed to load '{file_key}' from S3: {exc}")
-        return None
 
 
 @router.websocket("/ws/agent")
@@ -92,8 +77,8 @@ async def agent_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> N
 
         await websocket.send_json({"type": "start", "session_id": session_id})
 
-        # Load tagged articles off the event loop (S3 download + json parse).
-        articles = await asyncio.to_thread(_load_json, record.tagged_file)
+        # Load tagged articles from the database (tagged_articles).
+        articles = await asyncio.to_thread(get_tagged_articles, db, session_id)
         if not isinstance(articles, list):
             await websocket.send_json({"type": "error", "detail": "Tagged file is not a list of articles."})
             return
@@ -104,7 +89,7 @@ async def agent_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> N
         if intent == "chart":
             await _handle_chart(websocket, query, articles)
         else:
-            await _handle_question(websocket, query, articles, record.charts_data_file)
+            await _handle_question(websocket, session_id, record.project_id, query)
 
     except WebSocketDisconnect:
         logger.info("Agent websocket disconnected by client")
@@ -194,11 +179,75 @@ async def _execute_chart_with_retry(
         spec["python_code"] = fixed_code
 
 
+_CITATION_SNIPPET_CHARS = 300
+_PROMPT_EXCERPT_CHARS = 1200
+
+
+def _build_sources(nodes: list) -> list[dict[str, Any]]:
+    """Short, citation-friendly source records for the client."""
+    sources: list[dict[str, Any]] = []
+    for i, nws in enumerate(nodes, start=1):
+        meta = nws.node.metadata or {}
+        sources.append({
+            "n": i,
+            "article_ref": meta.get("article_ref") or None,
+            "title": meta.get("title") or None,
+            "url": meta.get("url") or None,
+            "published_date": meta.get("published_date") or None,
+            "sentiment": meta.get("sentiment") or None,
+            "section": meta.get("section") or None,
+            "score": float(nws.score) if nws.score is not None else None,
+            "snippet": nws.node.get_content()[:_CITATION_SNIPPET_CHARS],
+        })
+    return sources
+
+
+def _build_prompt_sources(nodes: list) -> str:
+    """Longer numbered excerpts for grounding the generation."""
+    lines = []
+    for i, nws in enumerate(nodes, start=1):
+        meta = nws.node.metadata or {}
+        title = meta.get("title") or "Untitled"
+        date = meta.get("published_date") or "n.d."
+        text = nws.node.get_content()[:_PROMPT_EXCERPT_CHARS]
+        lines.append(f"[{i}] {title} ({date})\n{text}")
+    return "\n\n".join(lines)
+
+
 async def _handle_question(
-    websocket: WebSocket, query: str, articles: list[dict[str, Any]], charts_data_file: str | None
+    websocket: WebSocket, session_id: int, project_id: int | None, query: str
 ) -> None:
-    await websocket.send_json({"type": "status", "message": "Reading tagged articles and dashboard charts..."})
-    charts_data = await asyncio.to_thread(_load_json_safe, charts_data_file) if charts_data_file else None
-    answer = await asyncio.to_thread(answer_question, query, articles, charts_data)
+    """Answer a data question with RAG: retrieve (hybrid + rerank + CRAG grade) over
+    the session's embedded articles, then generate a grounded, cited answer."""
+    await websocket.send_json({"type": "status", "message": "Searching articles…"})
+
+    from rag_helpers.agent.graph import run_retrieval
+    from rag_helpers.agent.prompts import ABSTAIN_MESSAGE, GENERATION_SYSTEM, GENERATION_USER
+    from rag_helpers.llm import get_llm
+
+    state = await run_retrieval(session_id, query, project_id=project_id)
+    nodes = state.get("nodes") or []
+    answerable = bool(state.get("answerable")) and bool(nodes)
+
+    if not answerable:
+        await websocket.send_json({"type": "answer", "answer": ABSTAIN_MESSAGE})
+        await websocket.send_json({"type": "complete", "intent": "question"})
+        return
+
+    from llama_index.core.llms import ChatMessage, MessageRole
+
+    messages = [
+        ChatMessage(role=MessageRole.SYSTEM, content=GENERATION_SYSTEM),
+        ChatMessage(
+            role=MessageRole.USER,
+            content=GENERATION_USER.format(
+                question=query, sources=_build_prompt_sources(nodes)
+            ),
+        ),
+    ]
+    resp = await get_llm().achat(messages)
+    answer = (resp.message.content if resp and resp.message else "") or ""
+
+    await websocket.send_json({"type": "sources", "sources": _build_sources(nodes)})
     await websocket.send_json({"type": "answer", "answer": answer})
     await websocket.send_json({"type": "complete", "intent": "question"})

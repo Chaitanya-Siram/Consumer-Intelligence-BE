@@ -84,6 +84,29 @@ class Configs:
     DB_PASSWORD = os.environ.get('DB_PASSWORD')
     DB_SCHEMA = os.environ.get('DB_SCHEMA', 'pr_solution')
 
+    # ===========================================================================
+    # RAG configuration (LlamaIndex + pgvector). See rag_helpers/.
+    # ===========================================================================
+    # Embeddings — local open-weight BGE via sentence-transformers (no API key, no
+    # data egress). bge-large-en-v1.5 is 1024-dim and truncates at 512 tokens.
+    EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "huggingface")
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
+    EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
+
+    # Reranking — local cross-encoder (no API key).
+    RERANK_PROVIDER = os.getenv("RERANK_PROVIDER", "huggingface")
+    RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
+
+    # Retrieval / chunking tuning. Keep CHUNK_SIZE under the 512-token embed limit.
+    CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "480"))
+    CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "64"))
+    RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "30"))
+    RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "6"))
+
+    # LlamaIndex owns the physical chunk/embedding table, prefixing this name with
+    # "data_" (→ data_rag_chunks) inside the DB_SCHEMA schema.
+    VECTOR_TABLE_NAME = os.getenv("VECTOR_TABLE_NAME", "rag_chunks")
+
     # Authentication / JWT configuration
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
     JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
