@@ -11,9 +11,18 @@ email-validator==2.3.0
 bcrypt==4.2.1
 PyJWT==2.10.1
 psycopg2==2.9.9
+pgvector==0.3.6
 boto3
 requests
 SQLAlchemy==2.0.27
+# RAG: LlamaIndex + local BGE embeddings/reranker + LangGraph retrieval agent
+llama-index-core==0.12.10
+llama-index-vector-stores-postgres==0.4.1
+llama-index-embeddings-huggingface==0.4.0
+sentence-transformers==3.3.1
+llama-index-llms-azure-openai==0.3.0
+llama-index-llms-anthropic==0.6.4
+langgraph==0.2.60
 e2b-code-interpreter>=1.0.0
 serpapi>=0.1.5
 feedparser==6.0.12

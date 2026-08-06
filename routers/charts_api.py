@@ -1,7 +1,6 @@
 import asyncio
 from collections import defaultdict
 import json
-import os
 import time
 from typing import Any, Callable
 from urllib.parse import quote
@@ -17,6 +16,7 @@ from db_helpers.database import get_db
 from db_helpers.schema import DASHBOARDS_ENUM
 from db_helpers.repository.sessions_db import get_session, update_session_charts_data_file
 from db_helpers.repository.projects_db import get_project
+from db_helpers.repository.tagged_articles_db import get_tagged_articles, upsert_tagged_article
 from file_helpers.s3_file import s3_file
 from configs import logger
 from charts_helpers.dashboards import get_dashboards_chart_data
@@ -70,8 +70,7 @@ def charts(
         project = get_project(db, record.project_id)
         sections_orders = project.sections_orders if project else None
 
-        raw = s3_file.download_file(tagged_file)
-        tagged_articles = json.loads(raw, parse_constant=lambda _: None)
+        tagged_articles = get_tagged_articles(db, session_id)
 
         dashboards_chart_data, data_for_insight = get_dashboards_chart_data(dashboards, tagged_articles, brand_keywords, competitor_keywords, message_keywords, sections_orders)
         
@@ -114,9 +113,8 @@ def charts(
             "storyboards": storyboards
         })
 
-        # Save the response to s3 and Log to Database
-        name, _ext = os.path.splitext(tagged_file)
-        charts_data_file_name = f"{name.replace('tagged', 'charts_data')}.json"
+        # Save the response to S3 (charts_data stays on S3) and log the key to the DB.
+        charts_data_file_name = f"session_files/session_{record.id}/charts_data/charts_data_{int(time.time())}.json"
         s3_file.upload_file(charts_data_file_name, json.dumps(response).encode("utf-8"))
         update_session_charts_data_file(db, record, charts_data_file_name)
         logger.info("Charts Data uploaded successfully")
@@ -278,15 +276,16 @@ def move_media_monitoring_article(payload: MoveArticleRequest, db: Session = Dep
         raise HTTPException(status_code=404, detail="Article not found in the media-monitoring sections.")
     s3_file.upload_file(record.charts_data_file, json.dumps(charts_data, default=str).encode("utf-8"))
 
-    # 2) Re-tag the article in the source tagged file so a regeneration keeps the move.
+    # 2) Re-tag the article in the tagged_articles table so a regeneration keeps the move.
     if record.tagged_file:
         try:
-            raw_tagged = s3_file.download_file(record.tagged_file)
-            tagged_articles = json.loads(raw_tagged, parse_constant=lambda _: None)
+            tagged_articles = get_tagged_articles(db, payload.session_id)
             if _set_article_section_in_tagged(tagged_articles, payload.article_id, payload.to_section):
-                s3_file.upload_file(record.tagged_file, json.dumps(tagged_articles, default=str).encode("utf-8"))
+                for a in tagged_articles:
+                    if isinstance(a, dict) and str(a.get("id")) == str(payload.article_id):
+                        upsert_tagged_article(db, payload.session_id, a)
         except Exception:  # noqa: BLE001
-            logger.exception(f"Failed to update tagged file for session_id={payload.session_id}")
+            logger.exception(f"Failed to update tagged articles for session_id={payload.session_id}")
 
     logger.info(
         f"Moved article {payload.article_id} from '{payload.from_section}' to "
@@ -419,8 +418,7 @@ async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> 
         project = get_project(db, record.project_id)
         sections_orders = project.sections_orders if project else None
 
-        raw = s3_file.download_file(tagged_file)
-        tagged_articles = json.loads(raw, parse_constant=lambda _: None)
+        tagged_articles = get_tagged_articles(db, session_id)
 
         await websocket.send_json(
             {"type": "start", "dashboards": dashboards, "total_articles": len(tagged_articles)}
@@ -460,9 +458,9 @@ async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> 
         logger.info(f"Charts generated in {time.time() - started:.1f}s")
 
         # Persist to S3 + flip the session to "Completed", mirroring GET /charts so
-        # the dashboard is cached and re-opening short-circuits above.
-        name, _ext = os.path.splitext(tagged_file)
-        charts_data_file_name = f"{name.replace('tagged', 'charts_data')}.json"
+        # the dashboard is cached and re-opening short-circuits above. charts_data
+        # stays on S3; only its key is logged to the DB.
+        charts_data_file_name = f"session_files/session_{record.id}/charts_data/charts_data_{int(time.time())}.json"
         s3_file.upload_file(charts_data_file_name, json.dumps(response).encode("utf-8"))
         update_session_charts_data_file(db, record, charts_data_file_name)
         logger.info("Charts Data uploaded successfully")

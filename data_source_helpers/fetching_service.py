@@ -9,18 +9,15 @@ file_parser.parse_upload keeps them (notably a canonical `date` field).
 """
 from __future__ import annotations
 
-import json
-import time
-from datetime import datetime
 from typing import Any
 from sqlalchemy.orm import Session
 from configs import logger
 from data_source_helpers.feedparser_helper import fetch_google_news_feedparser_boolean_query
 from data_source_helpers.serp_api_helper import fetch_google_news_for_queries
 from db_helpers.models.session_model import SessionModel
-from db_helpers.repository.sessions_db import update_session_source_file
-from file_helpers.file_parser import parse_upload
-from file_helpers.s3_file import s3_file
+from db_helpers.repository.sessions_db import update_session_source_file, DATA_IN_DB
+from db_helpers.repository.raw_articles_db import replace_raw_articles
+from db_helpers.repository.tagged_articles_db import delete_tagged_articles
 
 # Google News is the only RSS source the workflow data node currently offers.
 GOOGLE_NEWS_SOURCE = "google_news"
@@ -97,14 +94,13 @@ def fetch_articles_and_save(
         raise ValueError("No articles were fetched from SerpAPI for the session's queries.")
 
     records = [_to_source_record(a) for a in articles]
-    body = json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8")
 
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    file_key = f"session_files/session_{session.id}/{current_date}/raw_fetched_articles_{int(time.time())}.json"
-    s3_file.upload_file(file_key, body)
-
-    updated = update_session_source_file(db, session, file_key)
-    logger.info(f"Saved {len(records)} fetched article(s) to key='{file_key}' for session id={session.id}")
+    # Store the fetched records in the database (raw_articles) instead of a JSON
+    # source file on S3. A fresh source invalidates any prior tagged rows.
+    replace_raw_articles(db, session.id, records)
+    delete_tagged_articles(db, session.id)
+    updated = update_session_source_file(db, session, DATA_IN_DB)
+    logger.info(f"Saved {len(records)} fetched article(s) for session id={session.id}")
     return updated
 
 
@@ -198,19 +194,15 @@ def fetch_and_merge_workflow_rss(
     #         )
 
     merged_records = base_records + rss_records
-    body = json.dumps(merged_records, ensure_ascii=False, indent=2, default=str).encode("utf-8")
 
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    file_key = (
-        f"session_files/session_{session.id}/{current_date}/"
-        f"raw_{_RSS_MERGED_INFIX}_{int(time.time())}.json"
-    )
-    s3_file.upload_file(file_key, body)
-
-    updated = update_session_source_file(db, session, file_key)
+    # Store the fetched/merged records in the database (raw_articles) instead of a
+    # JSON source file on S3. A fresh source invalidates any prior tagged rows.
+    replace_raw_articles(db, session.id, merged_records)
+    delete_tagged_articles(db, session.id)
+    updated = update_session_source_file(db, session, DATA_IN_DB)
     logger.info(
         f"Saved {len(merged_records)} record(s) "
-        f"({len(base_records)} file + {len(rss_records)} RSS) to key='{file_key}' "
+        f"({len(base_records)} file + {len(rss_records)} RSS) "
         f"for session id={session.id}"
     )
     return updated, True
