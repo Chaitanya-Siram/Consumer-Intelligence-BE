@@ -101,7 +101,9 @@ class Configs:
     NVIDIA_EMBED_MODEL = os.getenv("NVIDIA_EMBED_MODEL", "nvidia/nemotron-3-embed-1b")
     NVIDIA_EMBED_BATCH_SIZE = int(os.getenv("NVIDIA_EMBED_BATCH_SIZE", "50"))
 
-    # Reranking — local cross-encoder (no API key).
+    # Reranking — local cross-encoder (no API key). Disabled keeps the pipeline
+    # API-only: no torch/sentence-transformers model is loaded or downloaded.
+    RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").strip().lower() in ("1", "true", "yes")
     RERANK_PROVIDER = os.getenv("RERANK_PROVIDER", "huggingface")
     RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
 
