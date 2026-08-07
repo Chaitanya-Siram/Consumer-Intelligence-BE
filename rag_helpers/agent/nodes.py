@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from configs import logger
+from configs import envs, logger
 from rag_helpers.agent.prompts import ANALYZE_PROMPT, GRADE_PROMPT, REWRITE_PROMPT
 from rag_helpers.agent.state import AgentState
 from rag_helpers.llm import get_llm
@@ -74,6 +74,10 @@ async def rerank(state: AgentState) -> AgentState:
     nodes = state.get("nodes") or []
     if not nodes:
         return {**state, "nodes": []}
+    if not envs.RERANK_ENABLED:
+        # Still cap to the reranker's node budget, in hybrid-retrieval score order,
+        # so the grade/generation prompts don't balloon to the full candidate set.
+        return {**state, "nodes": nodes[: envs.RERANK_TOP_N]}
     from llama_index.core import QueryBundle
 
     reranked = get_reranker().postprocess_nodes(
