@@ -87,11 +87,19 @@ class Configs:
     # ===========================================================================
     # RAG configuration (LlamaIndex + pgvector). See rag_helpers/.
     # ===========================================================================
-    # Embeddings — local open-weight BGE via sentence-transformers (no API key, no
-    # data egress). bge-large-en-v1.5 is 1024-dim and truncates at 512 tokens.
-    EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "huggingface")
+    # Embeddings. EMBED_DIM must match the active provider's output dim and the
+    # pgvector column: nvidia/nemotron-3-embed-1b is 2048, BGE-large is 1024.
+    EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "nvidia")
+    # EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "huggingface")
     EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
-    EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
+    EMBED_DIM = int(os.getenv("EMBED_DIM", "2048"))
+
+    # Nvidia Embedding Model API Key
+    NVIDIA_EMBED_API_URL = os.getenv("NVIDIA_EMBED_API_URL", "https://integrate.api.nvidia.com/v1")
+    NVIDIA_EMBED_API_KEY = os.getenv("NVIDIA_EMBED_API_KEY", "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")
+    # nemotron-3-embed-1b is 2048-dim and does not support dimension truncation.
+    NVIDIA_EMBED_MODEL = os.getenv("NVIDIA_EMBED_MODEL", "nvidia/nemotron-3-embed-1b")
+    NVIDIA_EMBED_BATCH_SIZE = int(os.getenv("NVIDIA_EMBED_BATCH_SIZE", "50"))
 
     # Reranking — local cross-encoder (no API key).
     RERANK_PROVIDER = os.getenv("RERANK_PROVIDER", "huggingface")

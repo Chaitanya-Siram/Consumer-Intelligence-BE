@@ -23,6 +23,10 @@ _EXCLUDED_KEYS = [
     "session_id", "project_id", "article_ref", "url", "published_date", "author", "domain",
 ]
 
+# Some scraped articles carry the whole body in "title". Left alone, the metadata
+# header alone exceeds CHUNK_SIZE and SentenceSplitter refuses the document.
+_MAX_TITLE_CHARS = 300
+
 
 def _article_text(article: dict[str, Any]) -> str:
     """The text to embed: title + primary body (content / article_text / summary)."""
@@ -53,7 +57,9 @@ def build_document(article: dict[str, Any], session_id: int, project_id: int | N
         "session_id": str(session_id),
         "project_id": str(project_id) if project_id is not None else "",
         "article_ref": article_ref,
-        "title": article.get("title") or "",
+        # Truncated for the metadata header only; the full title stays in the
+        # document text via _article_text, so no content is lost.
+        "title": (article.get("title") or "")[:_MAX_TITLE_CHARS],
         "author": article.get("author") or "",
         "url": article.get("url") or "",
         "domain": article.get("domain") or article.get("domain_name") or "",
