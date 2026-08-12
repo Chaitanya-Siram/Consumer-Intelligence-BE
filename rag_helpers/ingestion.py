@@ -20,7 +20,8 @@ from rag_helpers.vector_store import get_vector_store
 # Metadata kept for filtering/citation but NOT mixed into the embedded text or the
 # LLM prompt (avoids polluting the semantic signal).
 _EXCLUDED_KEYS = [
-    "session_id", "project_id", "article_ref", "url", "published_date", "author", "domain",
+    "session_id", "project_id", "article_ref", "url", "published_date", "author",
+    "domain", "publication",
 ]
 
 # Some scraped articles carry the whole body in "title". Left alone, the metadata
@@ -63,6 +64,9 @@ def build_document(article: dict[str, Any], session_id: int, project_id: int | N
         "author": article.get("author") or "",
         "url": article.get("url") or "",
         "domain": article.get("domain") or article.get("domain_name") or "",
+        # Display name of the outlet ("The Washington Post"), used as citation
+        # link text; falls back to the bare domain.
+        "publication": article.get("domain_name") or article.get("domain") or "",
         "published_date": article.get("date") or "",
         "sentiment": article.get("sentiment") or "",
         "theme": article.get("theme") or "",

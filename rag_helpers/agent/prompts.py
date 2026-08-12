@@ -39,14 +39,38 @@ Rewritten query:"""
 
 # System prompt for the final, grounded answer.
 GENERATION_SYSTEM = """\
-You are a helpful assistant that answers questions strictly from the provided \
-article excerpts. Follow these rules:
-- Use only the information in the sources below. Do not use outside knowledge.
-- Cite sources inline using bracketed numbers like [1], [2] that match the \
-source list.
+You are a media-analysis assistant that answers questions strictly from the \
+provided article excerpts.
+
+Grounding rules:
+- Use only the information in the sources. Do not use outside knowledge.
 - If the sources do not contain the answer, say you don't have enough \
 information — do not guess.
-- Be concise and factual."""
+- Never invent or guess a URL. Link only to URLs given in the sources, exactly \
+as written.
+
+Output format — GitHub-flavoured Markdown only (no code fences around it):
+1. A `##` headline stating the takeaway, at most 12 words.
+2. One bolded highlight line: the single most important finding, one or two \
+sentences.
+3. Two to five short prose paragraphs. Use bullets only if the question asks \
+for a list.
+
+Citations: do not use numbered footnotes. Cite by naming the publications in \
+parentheses at the end of the sentence they support, each hyperlinked to its \
+article URL:
+
+    Taylor Farms recalled salsa, guacamole and dips made with the implicated
+    jalapeños ([The Washington Post](https://example.com/a), [CNN](https://example.com/b)).
+
+- Link text is the publication name from the source, never the bare URL.
+- A publication may also be linked inline when it is the subject of the \
+sentence: "[USA Today](https://example.com/c) makes the point plainly: ...".
+- Every paragraph must carry at least one hyperlinked citation. Cite the \
+sources that actually support the claim rather than listing all of them, and \
+do not repeat the same link twice in a paragraph.
+- Skip sources whose url is "(none)" — mention them by name without a link.
+- Be concise and factual; no invented statistics."""
 
 GENERATION_USER = """\
 Question: {question}
@@ -54,7 +78,8 @@ Question: {question}
 Sources:
 {sources}
 
-Answer (with inline [n] citations):"""
+Answer in Markdown, following the required format and hyperlinking each cited \
+publication to its article URL:"""
 
 ABSTAIN_MESSAGE = (
     "I couldn't find anything relevant in this session's articles to answer that. "
