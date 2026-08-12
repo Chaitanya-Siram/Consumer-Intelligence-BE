@@ -183,6 +183,16 @@ _CITATION_SNIPPET_CHARS = 300
 _PROMPT_EXCERPT_CHARS = 1200
 
 
+def _publication(meta: dict[str, Any]) -> str:
+    """Outlet display name for citation link text."""
+    return (
+        meta.get("publication")
+        or meta.get("domain_name")
+        or meta.get("domain")
+        or "Unknown publication"
+    )
+
+
 def _build_sources(nodes: list) -> list[dict[str, Any]]:
     """Short, citation-friendly source records for the client."""
     sources: list[dict[str, Any]] = []
@@ -192,6 +202,7 @@ def _build_sources(nodes: list) -> list[dict[str, Any]]:
             "n": i,
             "article_ref": meta.get("article_ref") or None,
             "title": meta.get("title") or None,
+            "publication": _publication(meta),
             "url": meta.get("url") or None,
             "published_date": meta.get("published_date") or None,
             "sentiment": meta.get("sentiment") or None,
@@ -203,14 +214,19 @@ def _build_sources(nodes: list) -> list[dict[str, Any]]:
 
 
 def _build_prompt_sources(nodes: list) -> str:
-    """Longer numbered excerpts for grounding the generation."""
+    """Longer numbered excerpts, plus the publication + URL used for markdown links."""
     lines = []
     for i, nws in enumerate(nodes, start=1):
         meta = nws.node.metadata or {}
         title = meta.get("title") or "Untitled"
         date = meta.get("published_date") or "n.d."
         text = nws.node.get_content()[:_PROMPT_EXCERPT_CHARS]
-        lines.append(f"[{i}] {title} ({date})\n{text}")
+        lines.append(
+            f"[{i}] {title} ({date})\n"
+            f"publication: {_publication(meta)}\n"
+            f"url: {meta.get('url') or '(none)'}\n"
+            f"{text}"
+        )
     return "\n\n".join(lines)
 
 
