@@ -8,6 +8,8 @@ def count_keyword_occurrences(text, keyword):
     """
     Count the occurrences of a keyword in a given text.
     """
+    if keyword is None:
+        return 0
     return text.lower().count(keyword.lower())
 
 

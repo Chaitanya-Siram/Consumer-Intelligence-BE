@@ -58,9 +58,9 @@ def charts(
             raise HTTPException(status_code=404, detail=f"Not processed yet, run the tagging agent")
         
         if record.workflow:
-            dashboards = list[str]
+            dashboards = []
             for node in record.workflow.get("nodes"):
-                if node.get("type") == "analysis" and node.get("data", {}).get("lens"):
+                if node.get("type") == "analysis" and "lens" in node.get("data", {}):
                     dashboards.append(node["data"]["lens"])
             dashboards = list(set(dashboards))
         
