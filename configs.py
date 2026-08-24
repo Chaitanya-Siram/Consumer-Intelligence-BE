@@ -123,6 +123,10 @@ class Configs:
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
     REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
+    # Symmetric key encrypting data-provider credentials at rest. Any passphrase
+    # works (it is SHA-256 derived); rotating it makes existing rows unreadable.
+    CREDENTIALS_ENCRYPTION_KEY = os.getenv("CREDENTIALS_ENCRYPTION_KEY", "") or JWT_SECRET_KEY
+
     # Warn about missing critical configuration variables
     required_vars = {
         "LLM_PROVIDER": LLM_PROVIDER,
