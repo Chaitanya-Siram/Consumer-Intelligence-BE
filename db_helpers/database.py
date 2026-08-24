@@ -63,6 +63,7 @@ def init_db() -> None:
         user_org_mapping_model,
         raw_article_model,
         tagged_article_model,
+        data_providers_model,
     )
 
     # pgvector backs the RAG chunk store (the chunk/embedding table itself is

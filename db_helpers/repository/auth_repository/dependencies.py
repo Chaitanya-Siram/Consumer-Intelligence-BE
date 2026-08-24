@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from configs import envs
 from db_helpers.repository.auth_repository.security import decode_access_token
 from db_helpers.database import get_db
-from db_helpers.models.user_model import UserModel
-from db_helpers.repository.users_db import get_user
+from db_helpers.models.user_model import CurrentUser, UserModel
+from db_helpers.repository.users_db import get_mapping, get_user
 
 # tokenUrl points at the login endpoint so Swagger's "Authorize" flow works.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -47,6 +47,59 @@ def get_current_user(
     return user
 
 
+# Roles on user_org_mapping that count as administering an organization.
+ORG_ADMIN_ROLES = {"admin", "org_admin", "owner"}
+
+ORG_ADMIN_EXC = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="Organization admin privileges required for this action.",
+)
+
+def require_org_admin(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> CurrentUser:
+    claims = decode_access_token(token)
+    if not claims or not claims.get("sub"):
+        raise _CREDENTIALS_EXC
+
+    try:
+        user_id = int(claims["sub"])
+    except (TypeError, ValueError):
+        raise _CREDENTIALS_EXC
+
+    user = get_user(db, user_id)
+    if user is None:
+        raise _CREDENTIALS_EXC
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user.")
+
+    role = claims.get("role")
+    if not role:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No role assign.")
+
+    if claims.get("org_id") is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No organization is associated with this session.",
+        )
+
+    # Superadmins pass regardless; everyone else needs an admin role in the org.
+    if not user.is_superadmin and role.lower() not in ORG_ADMIN_ROLES:
+        raise ORG_ADMIN_EXC
+    return CurrentUser(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        is_active=user.is_active,
+        is_superadmin=user.is_superadmin,
+        org_id=claims.get("org_id"),
+        role=role,
+    )
+
+
 def require_superadmin(
     current_user: UserModel = Depends(get_current_user),
 ) -> UserModel:
@@ -57,7 +110,6 @@ def require_superadmin(
             detail="Superadmin privileges required.",
         )
     return current_user
-
 
 def _superadmin_from_token(token: Optional[str], db: Session) -> Optional[UserModel]:
     """Resolve a bearer token to an active superadmin, or None if it doesn't qualify."""

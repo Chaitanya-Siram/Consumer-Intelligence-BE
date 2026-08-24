@@ -8,7 +8,7 @@ from db_helpers.database import init_db
 from routers import (
     upload_router, tagging_router, charts_router, agent_router,
     project_router, session_router, query_builder_router, generated_query_router,
-    auth_router, user_router, organization_router
+    auth_router, user_router, organization_router, data_provider_keys_router
 )
 
 init_db()
@@ -44,3 +44,4 @@ app.include_router(generated_query_router)
 app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(organization_router)
+app.include_router(data_provider_keys_router)

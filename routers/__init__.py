@@ -9,6 +9,7 @@ from .generated_query_api import router as generated_query_router
 from .auth_api import router as auth_router
 from .user_api import router as user_router
 from .organization_api import router as organization_router
+from .data_provider_keys_api import router as data_provider_keys_router
 
 __all__ = [
     "upload_router",
@@ -22,4 +23,5 @@ __all__ = [
     "auth_router",
     "user_router",
     "organization_router",
+    "data_provider_keys_router",
 ]
