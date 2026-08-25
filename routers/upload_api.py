@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 from pydantic import BaseModel
 from configs import logger
-from db_helpers.repository.sessions_db import create_session, update_session_source_file, DATA_IN_DB
+from db_helpers.repository.sessions_db import create_session, update_session_source_file
 from db_helpers.repository.raw_articles_db import replace_raw_articles
 from db_helpers.repository.tagged_articles_db import delete_tagged_articles
 from db_helpers.repository.projects_db import get_project
@@ -66,10 +66,10 @@ def upload(
     # original file on S3. A fresh source invalidates any prior tagged rows.
     replace_raw_articles(db, session.id, records)
     delete_tagged_articles(db, session.id)
-    update_session_source_file(db, session, DATA_IN_DB)
+    update_session_source_file(db, session, None)
 
     logger.info(f"Stored {len(records)} raw records for session_id={session.id}")
-    return UploadResponse(session_id=session.id, source_file=DATA_IN_DB, record_count=len(records))
+    return UploadResponse(session_id=session.id, source_file=None, record_count=len(records))
 
 
 @router.post("/session", response_model=CreateSessionResponse)

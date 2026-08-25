@@ -2,13 +2,6 @@ from typing import Any
 from sqlalchemy.orm import Session
 from db_helpers.models.session_model import SessionModel, SessionType
 
-# Marker stored in ``source_file`` / ``tagged_file`` now that the raw + tagged
-# article payloads live in the raw_articles / tagged_articles tables instead of on
-# S3. The columns are kept as lightweight "materialized" flags so existing presence
-# checks (e.g. ``if not record.tagged_file``) keep working unchanged. Only
-# ``charts_data_file`` still holds a real S3 key.
-DATA_IN_DB = "db"
-
 
 def get_session(db: Session, session_id: int) -> SessionModel | None:
     return db.query(SessionModel).filter(SessionModel.id == session_id).first()

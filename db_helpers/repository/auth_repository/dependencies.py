@@ -1,11 +1,10 @@
 """FastAPI dependencies for extracting and validating the authenticated user."""
 import secrets
 from typing import Optional
-
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, WebSocketException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-
+from starlette.requests import HTTPConnection
 from configs import envs
 from db_helpers.repository.auth_repository.security import decode_access_token
 from db_helpers.database import get_db
@@ -100,6 +99,59 @@ def require_org_admin(
     )
 
 
+def _extract_token(conn: HTTPConnection) -> str:
+    """Pull the bearer token from the Authorization header, falling back to the
+    `token` query parameter (used by browser WebSocket clients)."""
+    auth = conn.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):].strip()
+    return conn.query_params.get("token", "")
+
+
+def _reject(conn: HTTPConnection, detail: str) -> Exception:
+    """Build the right rejection for the connection type (WS close vs HTTP 401)."""
+    if conn.scope.get("type") == "websocket":
+        return WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason=detail)
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_connection_claims(conn: HTTPConnection) -> dict:
+    """Validate the token on an HTTP or WebSocket connection and return its claims.
+
+    Args:
+        conn: The incoming HTTP or WebSocket connection.
+
+    Returns:
+        The decoded JWT claims.
+    """
+    token = _extract_token(conn)
+    if not token:
+        raise _reject(conn, "Not authenticated.")
+    claims = decode_access_token(token)
+    if not claims or not claims.get("sub"):
+        raise _reject(conn, "Could not validate credentials.")
+    return claims
+
+
+def get_connection_org_id(conn: HTTPConnection) -> int:
+    """Resolve the caller's organization from an HTTP or WebSocket connection.
+
+    Args:
+        conn: The incoming HTTP or WebSocket connection.
+
+    Returns:
+        The org_id claim on the token.
+    """
+    org_id = get_connection_claims(conn).get("org_id")
+    if org_id is None:
+        raise _reject(conn, "No organization is associated with this session.")
+    return org_id
+
+
 def require_superadmin(
     current_user: UserModel = Depends(get_current_user),
 ) -> UserModel:
@@ -110,6 +162,7 @@ def require_superadmin(
             detail="Superadmin privileges required.",
         )
     return current_user
+
 
 def _superadmin_from_token(token: Optional[str], db: Session) -> Optional[UserModel]:
     """Resolve a bearer token to an active superadmin, or None if it doesn't qualify."""

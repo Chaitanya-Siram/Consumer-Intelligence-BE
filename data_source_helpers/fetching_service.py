@@ -15,7 +15,7 @@ from configs import logger
 from data_source_helpers.feedparser_helper import fetch_google_news_feedparser_boolean_query
 from data_source_helpers.serp_api_helper import fetch_google_news_for_queries
 from db_helpers.models.session_model import SessionModel
-from db_helpers.repository.sessions_db import update_session_source_file, DATA_IN_DB
+from db_helpers.repository.sessions_db import update_session_source_file
 from db_helpers.repository.raw_articles_db import replace_raw_articles
 from db_helpers.repository.tagged_articles_db import delete_tagged_articles
 
@@ -99,7 +99,7 @@ def fetch_articles_and_save(
     # source file on S3. A fresh source invalidates any prior tagged rows.
     replace_raw_articles(db, session.id, records)
     delete_tagged_articles(db, session.id)
-    updated = update_session_source_file(db, session, DATA_IN_DB)
+    updated = update_session_source_file(db, session, None)
     logger.info(f"Saved {len(records)} fetched article(s) for session id={session.id}")
     return updated
 
@@ -164,12 +164,6 @@ def fetch_and_merge_workflow_rss(
     if not queries:
         return session, False
 
-    # if _rss_already_materialized(session):
-    #     logger.info(
-    #         f"Session id={session.id} already has an RSS-merged source file; skipping re-fetch."
-    #     )
-    #     return session
-
     logger.info(f"Workflow RSS fetch for session id={session.id}: {len(queries)} query/queries")
     rss_articles = fetch_google_news_feedparser_boolean_query(queries)
     if not rss_articles:
@@ -182,16 +176,6 @@ def fetch_and_merge_workflow_rss(
     # Merge into the uploaded file's records when one is present; otherwise the
     # RSS records stand alone as a brand-new source file.
     base_records: list[dict[str, Any]] = []
-    # if session.source_file:
-    #     try:
-    #         existing = parse_upload(session.source_file, s3_file.download_file(session.source_file))
-    #         if isinstance(existing, list):
-    #             base_records = existing
-    #     except Exception as e:
-    #         logger.exception(
-    #             f"Could not read existing source file {session.source_file!r} for session "
-    #             f"id={session.id}; writing an RSS-only file instead: {e}"
-    #         )
 
     merged_records = base_records + rss_records
 
@@ -199,7 +183,7 @@ def fetch_and_merge_workflow_rss(
     # JSON source file on S3. A fresh source invalidates any prior tagged rows.
     replace_raw_articles(db, session.id, merged_records)
     delete_tagged_articles(db, session.id)
-    updated = update_session_source_file(db, session, DATA_IN_DB)
+    updated = update_session_source_file(db, session, None)
     logger.info(
         f"Saved {len(merged_records)} record(s) "
         f"({len(base_records)} file + {len(rss_records)} RSS) "

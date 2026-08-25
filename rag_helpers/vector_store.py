@@ -31,4 +31,10 @@ def get_vector_store():
         text_search_config="english",
         # IVFFlat keeps writes cheap; switch to HNSW for larger corpora.
         hnsw_kwargs=None,
+        # PGVectorStore builds its own engine, so it needs the same search_path as
+        # the app's: pgvector lives in DB_SCHEMA, and its DDL says `vector`
+        # unqualified.
+        create_engine_kwargs={
+            "connect_args": {"options": f"-csearch_path={envs.DB_SCHEMA},public"}
+        },
     )

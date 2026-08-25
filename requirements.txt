@@ -25,7 +25,7 @@ sentence-transformers==3.3.1
 llama-index-llms-azure-openai==0.3.0
 llama-index-llms-anthropic==0.6.4
 langgraph==0.2.60
-e2b-code-interpreter>=1.0.0
+e2b-code-interpreter==2.9.0
 serpapi>=0.1.5
 feedparser==6.0.12
 newspaper3k==0.2.8
@@ -33,3 +33,4 @@ beautifulsoup4==4.15.0
 lxml-html-clean==0.4.5
 python-docx==1.2.0
 tzdata==2024.1
+tavily-python

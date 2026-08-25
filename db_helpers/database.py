@@ -35,7 +35,14 @@ def _json_serializer(value) -> str:
 
 
 DATABASE_URL = f'postgresql://{envs.DB_USER}:{envs.DB_PASSWORD}@{envs.DB_HOST}:{envs.DB_PORT}/{envs.DB_NAME}'
-engine = create_engine(DATABASE_URL, json_serializer=_json_serializer)
+# search_path must include DB_SCHEMA: the pgvector extension is created there, so
+# the unqualified `vector` type LlamaIndex emits in its DDL only resolves if the
+# schema is on the path.
+engine = create_engine(
+    DATABASE_URL,
+    json_serializer=_json_serializer,
+    connect_args={"options": f"-csearch_path={DB_SCHEMA},public"},
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
