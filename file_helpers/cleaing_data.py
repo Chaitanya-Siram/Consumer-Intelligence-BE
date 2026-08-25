@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import re
 from typing import Any
 from configs import logger
@@ -18,33 +19,53 @@ DATE_FORMATS = (
     "%Y/%m/%d %H:%M",
     "%Y/%m/%d",
     "%a, %d %b %Y %H:%M:%S %Z",
+    "%Y%m%d %H:%M:%S",
+    "%Y%m%d %H:%M",
+    "%Y%m%d",
 )
 
-def _to_iso_date(raw: Any) -> str:
-    """Normalise a SerpAPI date to ISO 8601 (UTC, millisecond precision). Returns the
-    original string if it can't be parsed, and "" for empty input."""
+def to_datetime(raw: Any) -> datetime | None:
+    """Parse a source date into a timezone-aware UTC datetime.
+
+    Returns None when the input is empty or in no format we recognise. This is the
+    single date-parsing path — :func:`_to_iso_date` formats its result, and the
+    `date` timestamp columns on raw / tagged articles store it directly.
+    """
     raw = str(raw or "").strip()
     if not raw:
-        return ""
-    # Already ISO-ish?
+        return None
+    iso = f"{raw[:-1]}+00:00" if raw[-1:] in ("Z", "z") else raw
     try:
-        return _iso(datetime.fromisoformat(raw))
+        return _as_utc(datetime.fromisoformat(iso))
     except ValueError:
         pass
     for fmt in DATE_FORMATS:
         try:
-            return _iso(datetime.strptime(raw, fmt))
+            return _as_utc(datetime.strptime(raw, fmt))
         except ValueError:
             continue
-    logger.debug(f"Could not parse SerpAPI date {raw!r}; leaving as-is")
-    return raw
+    try:
+        return _as_utc(parsedate_to_datetime(raw))
+    except (TypeError, ValueError):
+        pass
+    logger.warning(f"Could not parse date {raw!r} — the date column will be NULL")
+    return None
 
 
-def _iso(dt: datetime) -> str:
-    """A tz-aware/naive datetime → UTC ISO 8601 with milliseconds (naive = assumed UTC)."""
+def _to_iso_date(raw: Any) -> str:
+    """Normalise a date to ISO 8601 (UTC, millisecond precision). Returns the
+    original string if it can't be parsed, and "" for empty input."""
+    parsed = to_datetime(raw)
+    if parsed is not None:
+        return parsed.isoformat(timespec="milliseconds")
+    return str(raw or "").strip()
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """A tz-aware/naive datetime → the same instant in UTC (naive = assumed UTC)."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+    return dt.astimezone(timezone.utc)
 
 
 def clean_articles(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

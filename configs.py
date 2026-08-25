@@ -127,6 +127,8 @@ class Configs:
     # works (it is SHA-256 derived); rotating it makes existing rows unreadable.
     CREDENTIALS_ENCRYPTION_KEY = os.getenv("CREDENTIALS_ENCRYPTION_KEY", "") or JWT_SECRET_KEY
 
+    DEFAULT_RSS_RECENCY_HOURS = 24
+
     # Warn about missing critical configuration variables
     required_vars = {
         "LLM_PROVIDER": LLM_PROVIDER,

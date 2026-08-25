@@ -164,3 +164,57 @@ def get_decrypted_credentials(provider_details: DataProvidersAPIKeyModel) -> dic
         "username": decrypt_secret(provider_details.username),
         "password": decrypt_secret(provider_details.password),
     }
+
+
+def get_org_active_data_providers_key(db: Session, org_id: int) -> dict[str, str | None]:
+    """Map provider name to plaintext API key for an org's active credentials.
+
+    Args:
+        db: Database session.
+        org_id: Owning organization id.
+
+    Returns:
+        Dict of provider name to decrypted API key.
+    """
+    records = (
+        db.query(DataProvidersAPIModel.name, DataProvidersAPIKeyModel.api_key)
+        .join(
+            DataProvidersAPIKeyModel,
+            DataProvidersAPIKeyModel.data_provider_id == DataProvidersAPIModel.id,
+        )
+        .filter(
+            DataProvidersAPIKeyModel.org_id == org_id,
+            DataProvidersAPIKeyModel.is_active.is_(True),
+            DataProvidersAPIModel.is_active.is_(True),
+        )
+        .all()
+    )
+    return {name.lower(): decrypt_secret(api_key) for name, api_key in records}
+
+
+def get_org_active_data_providers(db: Session, org_id: int) -> dict[str, str | None]:
+    """Map provider name to label for an org's active providers, including defaults.
+
+    Args:
+        db: Database session.
+        org_id: Owning organization id.
+
+    Returns:
+        Dict of provider name to label.
+    """
+    records = (
+        db.query(DataProvidersAPIModel.name, DataProvidersAPIModel.label)
+        .join(
+            DataProvidersAPIKeyModel,
+            DataProvidersAPIKeyModel.data_provider_id == DataProvidersAPIModel.id,
+        )
+        .filter(
+            DataProvidersAPIKeyModel.org_id == org_id,
+            DataProvidersAPIKeyModel.is_active.is_(True),
+            DataProvidersAPIModel.is_active.is_(True),
+        )
+        .all()
+    )
+    default_data = {"Google News": "google_news"}
+    active = {name: label.lower() for name, label in records}
+    return {**default_data, **active}

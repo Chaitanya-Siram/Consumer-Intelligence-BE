@@ -8,15 +8,16 @@ from ai_helpers.llm_service import tag_articles, tag_articles_streaming
 from ai_helpers.tagging_common import merge_tagged_with_articles, merge_tagged_with_syndication
 from ai_helpers.article_linker import link_articles
 from configs import logger
-from data_source_helpers.fetching_service import fetch_articles_and_save, fetch_and_merge_workflow_rss
+from data_source_helpers.fetching_service_v2 import fetching_service
 from data_source_helpers.newspaper_helper import article_content_fetch
 from db_helpers.models.session_model import SessionType
+from db_helpers.repository.auth_repository.dependencies import get_connection_org_id
+from db_helpers.repository.data_provider_keys_db import get_org_active_data_providers_key
 from db_helpers.repository.sessions_db import (
     get_session,
     invalidate_session_charts,
     update_session_status,
     update_session_tagged_file,
-    DATA_IN_DB,
 )
 from db_helpers.repository.raw_articles_db import get_raw_articles
 from db_helpers.repository.tagged_articles_db import (
@@ -73,7 +74,7 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         # queries). Fetch + merge into the uploaded file, or create a new source
         # file when none was uploaded. No-op when no RSS request is configured.
         if record.session_type == SessionType.QUERY:
-            record, is_fetched = fetch_and_merge_workflow_rss(record, db)
+            record, is_fetched = fetching_service.fetch_and_merge_workflow_rss(record, db)
             if is_fetched is False:
                 raise HTTPException(status_code=404, detail="No articles found for the queries")
 
@@ -129,7 +130,7 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         background_tasks.add_task(_reindex_for_chat, session_id, record.project_id, final_articles)
         if record.charts_data_file:
             s3_file.delete_file(record.charts_data_file)
-        update_session_tagged_file(db, record, DATA_IN_DB)
+        update_session_tagged_file(db, record, None)
 
         return final_articles
     except HTTPException:
@@ -149,8 +150,8 @@ def get_tagged_articles_api(session_id: int, db: Session = Depends(get_db)) -> A
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Workflow not found.")
-        if not record.tagged_file:
-            raise HTTPException(status_code=404, detail="No tagged file found for this session.")
+        # if not record.tagged_file:
+        #     raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
         return get_tagged_articles(db, session_id)
     except HTTPException:
@@ -161,7 +162,11 @@ def get_tagged_articles_api(session_id: int, db: Session = Depends(get_db)) -> A
 
 
 @router.websocket("/ws/tagging")
-async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> None:
+async def tagging_stream(
+    websocket: WebSocket,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_connection_org_id),
+) -> None:
     """Stream tagging progress over a WebSocket.
 
     Mirrors the POST /tagging flow but emits a message per completed batch so the
@@ -188,15 +193,50 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
         if record is None:
             await websocket.send_json({"type": "error", "detail": "Workflow not found."})
             return
+
+        # Data Providers API Key, scoped to the org on the connection's token.
+        data_providers_key = get_org_active_data_providers_key(db, org_id=org_id)
+
+        loop = asyncio.get_running_loop()
+        fetch_queue: asyncio.Queue = asyncio.Queue()
+        FETCH_DONE = object()
+        def on_fetch_progress(fetched: int) -> None:
+            loop.call_soon_threadsafe(fetch_queue.put_nowait, fetched)
         
         if record.session_type == SessionType.QUERY:
-            await websocket.send_json({"type": "progress", "message": "Fetched RSS articles — preparing to tag…"})
-            record, is_fetched = await asyncio.to_thread(fetch_and_merge_workflow_rss, record, db)
-            if is_fetched is False:
-                await websocket.send_json({"type": "error", "detail": "No articles found for the queries"})
-                return
+            await websocket.send_json({"type": "progress", "message": "Fetched articles......"})
+            fetch_task = asyncio.create_task(
+                asyncio.to_thread(
+                    fetching_service.fetch_and_merge_articles,
+                    record,
+                    db,
+                    data_providers_key,
+                    on_fetch_progress,
+                )
+            )
+            fetch_task.add_done_callback(lambda _: fetch_queue.put_nowait(FETCH_DONE))
 
-        if not record.source_file:
+            fetched_total = 0
+            while True:
+                item = await fetch_queue.get()
+                if item is FETCH_DONE:
+                    break
+                if isinstance(item, int) and item != fetched_total:
+                    fetched_total = item
+                    await websocket.send_json({"type": "fetch_progress", "fetched": fetched_total})
+
+            try:
+                await fetch_task  # re-raise any exception from the fetch thread
+            except ValueError as exc:
+                # "Nothing found" / "no queries" — the pool may still hold untagged
+                # articles from an earlier pass, so carry on and tag those.
+                logger.warning(f"Pool fetch found nothing for session_id={session_id}: {exc}")
+            await websocket.send_json({
+                "type": "progress",
+                "message": f"Fetched {fetched_total} articles — preparing to tag…" if fetched_total else "Fetched articles — preparing to tag…",
+            })
+
+        if not record.source_file and record.session_type == SessionType.UPLOAD:
             await websocket.send_json({"type": "error", "detail": "Workflow has no source_file set."})
             return
 
@@ -293,12 +333,12 @@ async def tagging_stream(websocket: WebSocket, db: Session = Depends(get_db)) ->
                 s3_file.delete_file(record.charts_data_file)
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to delete stale charts file; continuing.")
-        update_session_tagged_file(db, record, DATA_IN_DB)
+        update_session_tagged_file(db, record, None)
 
         await websocket.send_json(
             {
                 "type": "complete",
-                "tagged_file": DATA_IN_DB,
+                "tagged_file": "DB",
                 "total_tagged": len(final_articles),
                 "elapsed_seconds": round(time.time() - started, 1),
             }
@@ -407,7 +447,7 @@ def update_tagged_articles(
             "updated_ids": updated_ids,
             "cascaded_ids": cascaded_ids,
             "not_found_ids": not_found_ids,
-            "tagged_file": DATA_IN_DB,
+            "tagged_file": "DB",
         }
     except HTTPException:
         raise
@@ -617,8 +657,8 @@ def approve_tagged_articles(
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
-        if not record.tagged_file:
-            raise HTTPException(status_code=404, detail="No tagged file found for this session.")
+        # if not record.tagged_file:
+        #     raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
         articles = get_tagged_articles(db, session_id)
 

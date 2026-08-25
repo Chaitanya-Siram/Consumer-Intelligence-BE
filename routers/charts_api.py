@@ -53,9 +53,9 @@ def charts(
             charts_data = s3_file.download_file(record.charts_data_file)
             return json.loads(charts_data, parse_constant=lambda _: None)
         
-        tagged_file = record.tagged_file
-        if tagged_file is None:
-            raise HTTPException(status_code=404, detail=f"Not processed yet, run the tagging agent")
+        # tagged_file = record.tagged_file
+        # if tagged_file is None:
+        #     raise HTTPException(status_code=404, detail=f"Not processed yet, run the tagging agent")
         
         if record.workflow:
             dashboards = []
@@ -400,10 +400,10 @@ async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> 
             )
             return
 
-        tagged_file = record.tagged_file
-        if tagged_file is None:
-            await websocket.send_json({"type": "error", "detail": "Not processed yet, run the tagging agent"})
-            return
+        # tagged_file = record.tagged_file
+        # if tagged_file is None:
+        #     await websocket.send_json({"type": "error", "detail": "Not processed yet, run the tagging agent"})
+        #     return
         
         if record.workflow:
             dashboards = []

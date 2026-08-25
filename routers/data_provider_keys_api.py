@@ -18,6 +18,7 @@ from db_helpers.repository.auth_repository.dependencies import (
 from db_helpers.repository.data_provider_keys_db import (
     create_provider_key,
     delete_provider_key,
+    get_org_active_data_providers,
     get_provider_key,
     list_active_data_providers,
     list_provider_keys,
@@ -25,6 +26,15 @@ from db_helpers.repository.data_provider_keys_db import (
 )
 
 router = APIRouter(tags=["data-provider-keys"])
+
+
+@router.get("/data-providers", response_model=list[DataProvidersAPIResponse])
+def get_data_providers(
+    db: Session = Depends(get_db),
+    _: CurrentUser = Depends(get_current_user),
+) -> list[DataProvidersAPIModel]:
+    """Get all active data providers."""
+    return list_active_data_providers(db)
 
 
 def _to_response(provider_key: DataProvidersAPIKeyModel) -> DataProvidersAPIKeyResponse:
@@ -152,10 +162,14 @@ def delete(
     logger.info(f"Deleted data provider key id={key_id}")
 
 
-@router.get("/data-providers", response_model=list[DataProvidersAPIResponse])
-def get_data_providers(
+@router.get("/data-provider-keys/active")
+def get_list_active_api_key(
+    org_id: int = Query(description="Filter by organization."),
     db: Session = Depends(get_db),
-    _: CurrentUser = Depends(get_current_user),
-) -> list[DataProvidersAPIModel]:
-    """Get all active data providers."""
-    return list_active_data_providers(db)
+    current_user: CurrentUser = Depends(require_org_admin),
+):
+    """API to get All active data providers in Organization"""
+    if not current_user.is_superadmin:
+        org_id = current_user.org_id
+    records = get_org_active_data_providers(db, org_id)
+    return records
