@@ -1,13 +1,12 @@
 from datetime import datetime
 from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
-
 from agents.section_fetcher.sections_helper import extract_section_names
 from configs import logger
 from db_helpers.database import get_db
+from db_helpers.repository.auth_repository.dependencies import get_org_id
 from db_helpers.repository.projects_db import (
     create_project,
     delete_project,
@@ -70,6 +69,7 @@ class ProjectResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    org_id: int
     name: str
     description: Optional[str] = None
     is_active: bool
@@ -80,10 +80,14 @@ class ProjectResponse(BaseModel):
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-def create(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectResponse:
-    """Create a new project."""
-    project = create_project(db, name=payload.name, description=payload.description)
-    logger.info(f"Created project id={project.id} name={project.name!r}")
+def create(
+    payload: ProjectCreate,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
+) -> ProjectResponse:
+    """Create a new project in the caller's organization."""
+    project = create_project(db, org_id=org_id, name=payload.name, description=payload.description)
+    logger.info(f"Created project id={project.id} org_id={org_id} name={project.name!r}")
     return project
 
 
@@ -93,24 +97,36 @@ def list_all(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
 ) -> list[ProjectResponse]:
-    """List projects, newest first."""
-    return list_projects(db, include_inactive=include_inactive, skip=skip, limit=limit)
+    """List the caller's organization projects, newest first."""
+    return list_projects(
+        db, org_id=org_id, include_inactive=include_inactive, skip=skip, limit=limit
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-def retrieve(project_id: int, db: Session = Depends(get_db)) -> ProjectResponse:
+def retrieve(
+    project_id: int,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
+) -> ProjectResponse:
     """Fetch a single project by id."""
-    project = get_project(db, project_id)
+    project = get_project(db, project_id, org_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     return project
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
-def update(project_id: int, payload: ProjectUpdate, db: Session = Depends(get_db)) -> ProjectResponse:
+def update(
+    project_id: int,
+    payload: ProjectUpdate,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
+) -> ProjectResponse:
     """Partially update a project (only the fields provided are changed)."""
-    project = get_project(db, project_id)
+    project = get_project(db, project_id, org_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
 
@@ -124,9 +140,13 @@ def update(project_id: int, payload: ProjectUpdate, db: Session = Depends(get_db
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete(project_id: int, db: Session = Depends(get_db)) -> None:
+def delete(
+    project_id: int,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
+) -> None:
     """Delete a project (and its sessions, via ON DELETE CASCADE)."""
-    project = get_project(db, project_id)
+    project = get_project(db, project_id, org_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     delete_project(db, project)
@@ -135,10 +155,13 @@ def delete(project_id: int, db: Session = Depends(get_db)) -> None:
 
 @router.post("/{project_id}/add_sections_prompt", response_model=ProjectResponse)
 def add_sections_prompt(
-    project_id: int, payload: SectionsPromptUpdate, db: Session = Depends(get_db)
+    project_id: int,
+    payload: SectionsPromptUpdate,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
 ) -> ProjectResponse:
     """Set (or clear) the monitoring sections prompt for a project."""
-    project = get_project(db, project_id)
+    project = get_project(db, project_id, org_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
 
@@ -150,11 +173,14 @@ def add_sections_prompt(
 
 @router.put("/{project_id}/sections_orders", response_model=ProjectResponse)
 def update_sections_orders(
-    project_id: int, payload: SectionsOrderUpdate, db: Session = Depends(get_db)
+    project_id: int,
+    payload: SectionsOrderUpdate,
+    db: Session = Depends(get_db),
+    org_id: int = Depends(get_org_id),
 ) -> ProjectResponse:
     """Persist the section display order (e.g. after the user drags sections in the
     Media Monitoring dashboard)."""
-    project = get_project(db, project_id)
+    project = get_project(db, project_id, org_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
 

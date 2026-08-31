@@ -152,6 +152,30 @@ def get_connection_org_id(conn: HTTPConnection) -> int:
     return org_id
 
 
+def get_org_id(token: str = Depends(oauth2_scheme)) -> int:
+    """Resolve the caller's organization from the bearer token on an HTTP request.
+
+    Unlike get_connection_org_id this declares the OAuth2 scheme, so it shows up as
+    a secured endpoint in Swagger and the Authorize button applies to it.
+
+    Args:
+        token: Bearer token supplied by the OAuth2 scheme.
+
+    Returns:
+        The org_id claim on the token.
+    """
+    claims = decode_access_token(token)
+    if not claims or not claims.get("sub"):
+        raise _CREDENTIALS_EXC
+    org_id = claims.get("org_id")
+    if org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No organization is associated with this session.",
+        )
+    return org_id
+
+
 def require_superadmin(
     current_user: UserModel = Depends(get_current_user),
 ) -> UserModel:

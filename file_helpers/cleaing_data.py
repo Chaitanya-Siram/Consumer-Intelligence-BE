@@ -19,6 +19,9 @@ DATE_FORMATS = (
     "%Y/%m/%d %H:%M",
     "%Y/%m/%d",
     "%a, %d %b %Y %H:%M:%S %Z",
+    "%B %d, %Y %H:%M:%S",
+    "%B %d, %Y %H:%M",
+    "%B %d, %Y",
     "%Y%m%d %H:%M:%S",
     "%Y%m%d %H:%M",
     "%Y%m%d",
@@ -68,16 +71,36 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def clean_articles(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def raw_date_of(record: dict[str, Any]) -> str:
+    """The record's source date string, as given.
+
+    Some spreadsheet exports split the timestamp into a compact 8-char `date`
+    (20260728) plus a separate `time` column — those are rejoined here so the
+    normalizer sees the full timestamp. Everything else is passed through
+    untouched.
+    """
+    date = str(record.get("date") or "").strip()
+    time = str(record.get("time") or "").strip()
+    if len(date) == 8 and date.isdigit() and time:
+        return f"{date} {time}"
+    return date
+
+
+def clean_articles(records: list[dict[str, Any]], start_id: int = 1) -> list[dict[str, Any]]:
     """Drop empty rows, normalize whitespace/HTML, assign A0..An ids.
 
     Each output record preserves the original fields plus:
       - id: "A{i}"
       - article_text: the cleaned primary body text used for tagging
       - title: cleaned title if present
+
+    Args:
+        records: Raw article records.
+        start_id: First id number, so a later batch continues an existing session's
+            numbering instead of colliding with it.
     """
     cleaned: list[dict[str, Any]] = []
-    next_id = 1
+    next_id = start_id
     for record in records:
         if not isinstance(record, dict):
             continue
