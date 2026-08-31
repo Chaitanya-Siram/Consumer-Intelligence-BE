@@ -16,7 +16,6 @@ from db_helpers.repository.sessions_db import (
     get_session,
     invalidate_session_charts,
     update_session_status,
-    update_session_tagged_file,
 )
 from db_helpers.repository.raw_articles_db import get_raw_articles, get_untagged_raw_articles
 from db_helpers.repository.tagged_articles_db import (
@@ -135,7 +134,6 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         background_tasks.add_task(_reindex_for_chat, session_id, record.project_id, final_articles)
         if record.charts_data_file:
             s3_file.delete_file(record.charts_data_file)
-        update_session_tagged_file(db, record, None)
 
         return final_articles
     except HTTPException:

@@ -4,10 +4,7 @@ import threading
 from typing import Any
 from sqlalchemy.orm import Session
 from configs import logger
-from data_source_helpers.feedparser_helper import fetch_google_news_feedparser_boolean_query
-from db_helpers.models.data_providers_model import DataProvidersAPIKeyModel
 from db_helpers.models.session_model import SessionModel
-from db_helpers.repository.sessions_db import update_session_source_file
 from db_helpers.repository.raw_articles_db import add_new_raw_articles, get_raw_articles
 from data_source_helpers.google_news_rss import google_news_rss_scraper
 from data_source_helpers.tavily_helper import tavily_api_helper
@@ -133,55 +130,6 @@ class FetchingService():
             out.append(a)
         return out
 
-    def fetch_and_merge_workflow_rss(self, session: SessionModel, db: Session, data_providers_key: dict) -> SessionModel:
-        """Materialize the workflow Data node's Google News RSS request into the
-        session's source file.
-
-        When the Data node asks for `google_news` + queries: fetch and clean those
-        articles, then either MERGE them into the records of the already-uploaded
-        source file, or — when no file was uploaded — save them as a NEW source file.
-        Either way the session's `source_file` ends up pointing at a single JSON file
-        that the tagging pipeline reads unchanged.
-
-        No-ops (returns the session untouched) when the Data node has no RSS request,
-        when nothing could be fetched, or when a prior run already materialized it.
-        """
-        queries = self.extract_workflow_rss_queries(session)
-        if not queries:
-            return session, False
-
-        logger.info(f"Workflow RSS fetch for session id={session.id}: {len(queries)} query/queries")
-        rss_articles = google_news_rss_scraper.fetch_google_news_feedparser_boolean_query(queries)
-        if not rss_articles:
-            logger.warning(
-                f"No RSS articles fetched for session id={session.id}; leaving source file unchanged."
-            )
-            return session, False
-        rss_records = [self.to_source_record(a, "Google News") for a in rss_articles]
-
-        # Taviliy Fetcher
-        if data_providers_key.get("tavily"):
-            tavily_api = data_providers_key.get("tavily")
-            tavily_articles = tavily_api_helper.fetch_tavily_articles(tavily_api, queries)
-
-        # Merge into the uploaded file's records when one is present; otherwise the
-        # RSS records stand alone as a brand-new source file.
-        base_records: list[dict[str, Any]] = []
-
-        merged_records = base_records + rss_records
-
-        # Store the fetched/merged records in the database (raw_articles) instead of a
-        # JSON source file on S3. A fresh source invalidates any prior tagged rows.
-        # replace_raw_articles(db, session.id, merged_records)
-        # delete_tagged_articles(db, session.id)
-        updated = update_session_source_file(db, session, None)
-        logger.info(
-            f"Saved {len(merged_records)} record(s) "
-            f"({len(base_records)} file + {len(rss_records)} RSS) "
-            f"for session id={session.id}"
-        )
-        return updated, True
-
     def fetch_and_merge_articles(
         self,
         session: SessionModel,
@@ -265,7 +213,6 @@ class FetchingService():
             f"Added {len(added)} new article(s) for session id={session.id}; "
             f"{len(deduped) - len(added)} already stored"
         )
-        update_session_source_file(db, session, None)
         return get_raw_articles(db, session.id)
 
 
