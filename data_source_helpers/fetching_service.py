@@ -2,7 +2,7 @@
 single source file on S3 — so a query session feeds the same tagging → charts
 pipeline as an uploaded file.
 
-The session's `queries` column holds the query-builder's query groups
+The session's `queries` column holds query groups
 ([{"label": ..., "queries": [...]}]). We flatten those, fetch Google News for every
 query, merge + de-dup, then write ONE JSON file whose records are shaped so
 file_parser.parse_upload keeps them (notably a canonical `date` field).
@@ -30,7 +30,7 @@ _RSS_MERGED_INFIX = "rss_merged"
 def _flatten_session_queries(queries: Any) -> list[dict[str, str]]:
     """Flatten the session's stored query groups into [{group, query}, ...].
 
-    Tolerates the query-builder shape ([{"label", "queries": [...]}]) as well as a
+    Tolerates the grouped shape ([{"label", "queries": [...]}]) as well as a
     bare list of query strings.
     """
     flat: list[dict[str, str]] = []

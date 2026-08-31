@@ -1,5 +1,3 @@
-import asyncio
-
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +5,7 @@ from exception_handlers import validation_exception_handler
 from db_helpers.database import init_db
 from routers import (
     upload_router, tagging_router, charts_router, agent_router,
-    project_router, session_router, query_builder_router, generated_query_router,
+    project_router, session_router,
     auth_router, user_router, organization_router, data_provider_keys_router
 )
 
@@ -15,13 +13,6 @@ init_db()
 
 app = FastAPI(title="PR Solutions", version="1.0.0")
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
-
-
-# @app.on_event("startup")
-# async def _start_scheduler() -> None:
-#     """Launch the recurring daily generated-query scheduler in the background."""
-#     from scheduler import scheduler_loop
-#     asyncio.create_task(scheduler_loop())
 
 # CORS — allow the Vite dev server (and any origin) to call the API.
 app.add_middleware(
@@ -33,15 +24,13 @@ app.add_middleware(
 )
 
 # app.include_router(health_router)
+app.include_router(auth_router)
+app.include_router(organization_router)
+app.include_router(user_router)
 app.include_router(upload_router)
 app.include_router(tagging_router)
 app.include_router(charts_router)
 app.include_router(agent_router)
 app.include_router(project_router)
 app.include_router(session_router)
-app.include_router(query_builder_router)
-app.include_router(generated_query_router)
-app.include_router(auth_router)
-app.include_router(user_router)
-app.include_router(organization_router)
 app.include_router(data_provider_keys_router)

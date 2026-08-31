@@ -19,6 +19,7 @@ class SessionModel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("user_org_mapping.id", ondelete="SET_NULL"), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     session_type = Column(String, nullable=False, default="upload")
@@ -32,6 +33,10 @@ class SessionModel(Base):
     # Visual pipeline graph (nodes + edges) built in the workflow designer.
     workflow = Column(NestedMutableDict.as_mutable(JSON), nullable=True)
     status = Column(String, nullable=False, default="Uploaded")
+    # schedule_time = Column(String, nullable=True)
+    # schedule_timezone = Column(String, nullable=True)
+    # schedule_time_utc = Column(String, nullable=True)
+    # last_run_at = Column(DateTime, nullable=True)
 
 
 class SessionResponse(BaseModel):
