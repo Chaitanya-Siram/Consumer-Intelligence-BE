@@ -53,10 +53,7 @@ def charts(
             charts_data = s3_file.download_file(record.charts_data_file)
             return json.loads(charts_data, parse_constant=lambda _: None)
         
-        # tagged_file = record.tagged_file
-        # if tagged_file is None:
-        #     raise HTTPException(status_code=404, detail=f"Not processed yet, run the tagging agent")
-        
+       
         if record.workflow:
             dashboards = []
             for node in record.workflow.get("nodes"):
@@ -125,6 +122,195 @@ def charts(
     except Exception as exc:
         logger.exception(f"Failed to generate charts for session_id={session_id}")
         raise HTTPException(status_code=500, detail=f"Failed to generate charts: {exc}") from exc
+
+
+def _build_charts(
+    dashboards: list[str],
+    tagged_articles: list[dict],
+    brand_keywords: Any,
+    competitor_keywords: Any,
+    message_keywords: Any,
+    emit: Callable[[dict[str, Any]], None],
+    sections_orders: Any = None,
+) -> dict[str, Any]:
+    """Build the full charts response, emitting a progress event per stage.
+
+    Runs the same pipeline as the GET /charts handler. `emit` is a thread-safe
+    callback that forwards a payload dict to the WebSocket. Pure compute — no DB
+    access — so it is safe to run in a worker thread.
+    """
+    emit({"type": "progress", "stage": "chart_data", "message": "Building chart data…"})
+    dashboards_chart_data, data_for_insight = get_dashboards_chart_data(
+        dashboards, tagged_articles, brand_keywords, competitor_keywords, message_keywords, sections_orders
+    )
+
+    emit({"type": "progress", "stage": "insights", "message": "Generating chart insights and overall summaries…"})
+    started = time.time()
+    insights = synthesize_chart_insights(
+        dashboards,
+        data_for_insight,
+        brand_keywords=brand_keywords,
+        tagged_articles=tagged_articles,
+    )
+    logger.info(f"Insights Completed in {time.time() - started:.1f}s")
+
+    top_narratives = []
+    if DASHBOARDS_ENUM.narrative_intelligence in dashboards:
+        emit({"type": "progress", "stage": "narratives", "message": "Generating top narratives…"})
+        narrative_started = time.time()
+        top_narratives = synthesize_top_narratives(tagged_articles, brand_keywords)
+        logger.info(
+            f"Top Narrative Completed in {time.time() - narrative_started:.1f}s ({len(top_narratives)} narratives)"
+        )
+
+    storyboards = defaultdict(dict)
+    for d in dashboards:
+        charts_data = dashboards_chart_data.get(d, {})
+        if not charts_data or d == DASHBOARDS_ENUM.media_monitoring:
+            continue
+        emit({"type": "progress", "stage": "storyboard", "dashboard": str(d), "message": f"Building storyboard for {d}…"})
+        storyboard_started = time.time()
+        storyboard = synthesize_storyboard(charts_data, dashboard=d, brand_keywords=brand_keywords)
+        logger.info(
+            f"Storyboard synthesis completed for {d} in {time.time() - storyboard_started:.1f}s ({len(storyboard)} chapters)"
+        )
+        storyboards[d] = storyboard
+
+    return jsonable_encoder({
+        **dashboards_chart_data,
+        **insights,
+        "top_narratives": top_narratives,
+        "storyboards": storyboards,
+    })
+
+
+@router.websocket("/ws/charts")
+async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> None:
+    """Stream chart generation progress over a WebSocket.
+
+    Mirrors the GET /charts flow but emits a message per pipeline stage (chart
+    data, insights, narratives, storyboards) so the client sees progress in real
+    time. Message types: "start", "progress", "complete", "error".
+
+    The client sends an init message: {"session_id": int, "dashboards": [..]?}.
+    """
+    await websocket.accept()
+    session_id = None
+    try:
+        init = await websocket.receive_json()
+    except (WebSocketDisconnect, ValueError) as exc:
+        logger.warning(f"Charts websocket init failed: {exc}")
+        await websocket.close()
+        return
+    try:
+        session_id = init.get("session_id") if isinstance(init, dict) else None
+        logger.info(f"Charts stream started for session_id={session_id}")
+        if session_id is None or not isinstance(session_id, int):
+            await websocket.send_json({"type": "error", "detail": "Missing or invalid 'session_id'."})
+            await websocket.close()
+            return
+
+        dashboards = init.get("dashboards") if isinstance(init, dict) else None
+        dashboards = dashboards or [d.value for d in DASHBOARDS_ENUM]
+
+        record = get_session(db, session_id)
+        if record is None:
+            await websocket.send_json({"type": "error", "detail": "Session not found."})
+            return
+
+        # Cached charts: short-circuit and return the stored payload immediately.
+        if record.charts_data_file:
+            charts_data = s3_file.download_file(record.charts_data_file)
+            await websocket.send_json(
+                {
+                    "type": "complete",
+                    "cached": True,
+                    "charts_data": json.loads(charts_data, parse_constant=lambda _: None),
+                }
+            )
+            return
+        
+        if record.workflow:
+            dashboards = []
+            for node in record.workflow.get("nodes"):
+                if node.get("type") == "analysis" and node.get("data", {}).get("lens"):
+                    dashboards.append(node["data"]["lens"])
+            dashboards = list(set(dashboards))
+
+        brand_keywords = record.brand_keywords
+        competitor_keywords = record.competitor_keywords
+        message_keywords = record.message_keywords
+        project = get_project(db, record.project_id)
+        sections_orders = project.sections_orders if project else None
+
+        tagged_articles = get_tagged_articles(db, session_id)
+
+        await websocket.send_json(
+            {"type": "start", "dashboards": dashboards, "total_articles": len(tagged_articles)}
+        )
+
+        # Bridge the synchronous per-stage emit callback (invoked from the worker
+        # thread) into this async handler via a queue. A sentinel marks the end.
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        DONE = object()
+
+        def emit(payload: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+        started = time.time()
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                _build_charts,
+                dashboards,
+                tagged_articles,
+                brand_keywords,
+                competitor_keywords,
+                message_keywords,
+                emit,
+                sections_orders,
+            )
+        )
+        task.add_done_callback(lambda _: queue.put_nowait(DONE))
+
+        while True:
+            payload = await queue.get()
+            if payload is DONE:
+                break
+            await websocket.send_json(payload)
+
+        response = await task  # re-raise any exception from the compute thread
+        logger.info(f"Charts generated in {time.time() - started:.1f}s")
+
+        # Persist to S3 + flip the session to "Completed", mirroring GET /charts so
+        # the dashboard is cached and re-opening short-circuits above. charts_data
+        # stays on S3; only its key is logged to the DB.
+        charts_data_file_name = f"session_files/session_{record.id}/charts_data/charts_data_{int(time.time())}.json"
+        s3_file.upload_file(charts_data_file_name, json.dumps(response).encode("utf-8"))
+        update_session_charts_data_file(db, record, charts_data_file_name)
+        logger.info("Charts Data uploaded successfully")
+
+        await websocket.send_json(
+            {
+                "type": "complete",
+                "cached": False,
+                "charts_data": response,
+                "elapsed_seconds": round(time.time() - started, 1),
+            }
+        )
+    except WebSocketDisconnect:
+        logger.info(f"Charts WebSocket disconnected for session_id={session_id}")
+    except Exception as exc:
+        logger.exception(f"Charts stream failed for session_id={session_id}")
+        try:
+            await websocket.send_json({"type": "error", "detail": f"Failed to generate charts: {exc}"})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @router.get("/media-monitoring/report")
@@ -292,197 +478,3 @@ def move_media_monitoring_article(payload: MoveArticleRequest, db: Session = Dep
         f"'{payload.to_section}' for session_id={payload.session_id}"
     )
     return {"status": "ok"}
-
-
-def _build_charts(
-    dashboards: list[str],
-    tagged_articles: list[dict],
-    brand_keywords: Any,
-    competitor_keywords: Any,
-    message_keywords: Any,
-    emit: Callable[[dict[str, Any]], None],
-    sections_orders: Any = None,
-) -> dict[str, Any]:
-    """Build the full charts response, emitting a progress event per stage.
-
-    Runs the same pipeline as the GET /charts handler. `emit` is a thread-safe
-    callback that forwards a payload dict to the WebSocket. Pure compute — no DB
-    access — so it is safe to run in a worker thread.
-    """
-    emit({"type": "progress", "stage": "chart_data", "message": "Building chart data…"})
-    dashboards_chart_data, data_for_insight = get_dashboards_chart_data(
-        dashboards, tagged_articles, brand_keywords, competitor_keywords, message_keywords, sections_orders
-    )
-
-    emit({"type": "progress", "stage": "insights", "message": "Generating chart insights and overall summaries…"})
-    started = time.time()
-    insights = synthesize_chart_insights(
-        dashboards,
-        data_for_insight,
-        brand_keywords=brand_keywords,
-        tagged_articles=tagged_articles,
-    )
-    logger.info(f"Insights Completed in {time.time() - started:.1f}s")
-
-    top_narratives = []
-    if DASHBOARDS_ENUM.narrative_intelligence in dashboards:
-        emit({"type": "progress", "stage": "narratives", "message": "Generating top narratives…"})
-        narrative_started = time.time()
-        top_narratives = synthesize_top_narratives(tagged_articles, brand_keywords)
-        logger.info(
-            f"Top Narrative Completed in {time.time() - narrative_started:.1f}s ({len(top_narratives)} narratives)"
-        )
-
-    storyboards = defaultdict(dict)
-    for d in dashboards:
-        charts_data = dashboards_chart_data.get(d, {})
-        if not charts_data or d == DASHBOARDS_ENUM.media_monitoring:
-            continue
-        emit({"type": "progress", "stage": "storyboard", "dashboard": str(d), "message": f"Building storyboard for {d}…"})
-        storyboard_started = time.time()
-        storyboard = synthesize_storyboard(charts_data, dashboard=d, brand_keywords=brand_keywords)
-        logger.info(
-            f"Storyboard synthesis completed for {d} in {time.time() - storyboard_started:.1f}s ({len(storyboard)} chapters)"
-        )
-        storyboards[d] = storyboard
-
-    return jsonable_encoder({
-        **dashboards_chart_data,
-        **insights,
-        "top_narratives": top_narratives,
-        "storyboards": storyboards,
-    })
-
-
-@router.websocket("/ws/charts")
-async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> None:
-    """Stream chart generation progress over a WebSocket.
-
-    Mirrors the GET /charts flow but emits a message per pipeline stage (chart
-    data, insights, narratives, storyboards) so the client sees progress in real
-    time. Message types: "start", "progress", "complete", "error".
-
-    The client sends an init message: {"session_id": int, "dashboards": [..]?}.
-    """
-    await websocket.accept()
-    session_id = None
-    try:
-        init = await websocket.receive_json()
-    except (WebSocketDisconnect, ValueError) as exc:
-        logger.warning(f"Charts websocket init failed: {exc}")
-        await websocket.close()
-        return
-    try:
-        session_id = init.get("session_id") if isinstance(init, dict) else None
-        logger.info(f"Charts stream started for session_id={session_id}")
-        if session_id is None or not isinstance(session_id, int):
-            await websocket.send_json({"type": "error", "detail": "Missing or invalid 'session_id'."})
-            await websocket.close()
-            return
-
-        dashboards = init.get("dashboards") if isinstance(init, dict) else None
-        dashboards = dashboards or [d.value for d in DASHBOARDS_ENUM]
-
-        record = get_session(db, session_id)
-        if record is None:
-            await websocket.send_json({"type": "error", "detail": "Session not found."})
-            return
-
-        # Cached charts: short-circuit and return the stored payload immediately.
-        if record.charts_data_file:
-            charts_data = s3_file.download_file(record.charts_data_file)
-            await websocket.send_json(
-                {
-                    "type": "complete",
-                    "cached": True,
-                    "charts_data": json.loads(charts_data, parse_constant=lambda _: None),
-                }
-            )
-            return
-
-        # tagged_file = record.tagged_file
-        # if tagged_file is None:
-        #     await websocket.send_json({"type": "error", "detail": "Not processed yet, run the tagging agent"})
-        #     return
-        
-        if record.workflow:
-            dashboards = []
-            for node in record.workflow.get("nodes"):
-                if node.get("type") == "analysis" and node.get("data", {}).get("lens"):
-                    dashboards.append(node["data"]["lens"])
-            dashboards = list(set(dashboards))
-
-        brand_keywords = record.brand_keywords
-        competitor_keywords = record.competitor_keywords
-        message_keywords = record.message_keywords
-        project = get_project(db, record.project_id)
-        sections_orders = project.sections_orders if project else None
-
-        tagged_articles = get_tagged_articles(db, session_id)
-
-        await websocket.send_json(
-            {"type": "start", "dashboards": dashboards, "total_articles": len(tagged_articles)}
-        )
-
-        # Bridge the synchronous per-stage emit callback (invoked from the worker
-        # thread) into this async handler via a queue. A sentinel marks the end.
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-        DONE = object()
-
-        def emit(payload: dict[str, Any]) -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, payload)
-
-        started = time.time()
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                _build_charts,
-                dashboards,
-                tagged_articles,
-                brand_keywords,
-                competitor_keywords,
-                message_keywords,
-                emit,
-                sections_orders,
-            )
-        )
-        task.add_done_callback(lambda _: queue.put_nowait(DONE))
-
-        while True:
-            payload = await queue.get()
-            if payload is DONE:
-                break
-            await websocket.send_json(payload)
-
-        response = await task  # re-raise any exception from the compute thread
-        logger.info(f"Charts generated in {time.time() - started:.1f}s")
-
-        # Persist to S3 + flip the session to "Completed", mirroring GET /charts so
-        # the dashboard is cached and re-opening short-circuits above. charts_data
-        # stays on S3; only its key is logged to the DB.
-        charts_data_file_name = f"session_files/session_{record.id}/charts_data/charts_data_{int(time.time())}.json"
-        s3_file.upload_file(charts_data_file_name, json.dumps(response).encode("utf-8"))
-        update_session_charts_data_file(db, record, charts_data_file_name)
-        logger.info("Charts Data uploaded successfully")
-
-        await websocket.send_json(
-            {
-                "type": "complete",
-                "cached": False,
-                "charts_data": response,
-                "elapsed_seconds": round(time.time() - started, 1),
-            }
-        )
-    except WebSocketDisconnect:
-        logger.info(f"Charts WebSocket disconnected for session_id={session_id}")
-    except Exception as exc:
-        logger.exception(f"Charts stream failed for session_id={session_id}")
-        try:
-            await websocket.send_json({"type": "error", "detail": f"Failed to generate charts: {exc}"})
-        except Exception:
-            pass
-    finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass

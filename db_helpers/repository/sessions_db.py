@@ -1,6 +1,6 @@
 from typing import Any
 from sqlalchemy.orm import Session
-from db_helpers.models.session_model import SessionModel, SessionType
+from db_helpers.models.session_model import SessionModel
 
 
 def get_session(db: Session, session_id: int) -> SessionModel | None:
