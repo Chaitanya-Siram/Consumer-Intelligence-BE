@@ -43,24 +43,6 @@ def create_session(
     return new_session
 
 
-def update_session_source_file(db: Session, session: SessionModel, source_file: str) -> SessionModel:
-    session.source_file = source_file
-    session.tagged_file = None
-    session.charts_data_file = None
-    db.commit()
-    db.refresh(session)
-    return session
-
-
-def update_session_tagged_file(db: Session, session: SessionModel, tagged_file: str) -> SessionModel:
-    session.tagged_file = tagged_file
-    session.charts_data_file = None
-    session.status = "Tagged"
-    db.commit()
-    db.refresh(session)
-    return session
-
-
 def update_session_charts_data_file(db: Session, session: SessionModel, charts_data_file: str) -> SessionModel:
     session.charts_data_file = charts_data_file
     session.status = "Completed"

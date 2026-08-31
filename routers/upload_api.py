@@ -15,6 +15,7 @@ router = APIRouter(tags=["upload"])
 
 class UploadResponse(BaseModel):
     file_upload_id: str
+    file_name: str
     record_count: int
 
 
@@ -52,4 +53,4 @@ def upload(
     add_upload_raw_articles(db, project_id, file_upload_id, records)
 
     logger.info(f"Stored {len(records)} raw records for file_upload_id={file_upload_id}")
-    return UploadResponse(file_upload_id=file_upload_id, record_count=len(records))
+    return UploadResponse(file_upload_id=file_upload_id, file_name=file.filename, record_count=len(records))
