@@ -182,7 +182,7 @@ def fetch_google_news_for_queries(
 ) -> list[dict[str, Any]]:
     """Fetch and merge Google News articles for many queries, deduped across all of
     them by URL. Each article is tagged with its `query` (and `group` when the input
-    items carry a "group" label — pairs with query_builder's flatten_queries()).
+    items carry a "group" label).
 
     Args:
         queries: either a list of query strings, or a list of

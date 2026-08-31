@@ -5,25 +5,33 @@ from db_helpers.models.project_model import ProjectModel
 _UPDATABLE_FIELDS = {"name", "description", "is_active"}
 
 
-def create_project(db: Session, name: str, description: str | None = None) -> ProjectModel:
-    project = ProjectModel(name=name, description=description)
+def create_project(
+    db: Session, org_id: int, name: str, description: str | None = None
+) -> ProjectModel:
+    project = ProjectModel(org_id=org_id, name=name, description=description)
     db.add(project)
     db.commit()
     db.refresh(project)
     return project
 
 
-def get_project(db: Session, project_id: int) -> ProjectModel | None:
-    return db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+def get_project(db: Session, project_id: int, org_id: int | None = None) -> ProjectModel | None:
+    query = db.query(ProjectModel).filter(ProjectModel.id == project_id)
+    if org_id is not None:
+        query = query.filter(ProjectModel.org_id == org_id)
+    return query.first()
 
 
 def list_projects(
     db: Session,
+    org_id: int | None = None,
     include_inactive: bool = True,
     skip: int = 0,
     limit: int = 100,
 ) -> list[ProjectModel]:
     query = db.query(ProjectModel)
+    if org_id is not None:
+        query = query.filter(ProjectModel.org_id == org_id)
     if not include_inactive:
         query = query.filter(ProjectModel.is_active.is_(True))
     return (

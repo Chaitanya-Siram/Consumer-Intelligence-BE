@@ -8,8 +8,7 @@ from data_source_helpers.feedparser_helper import fetch_google_news_feedparser_b
 from db_helpers.models.data_providers_model import DataProvidersAPIKeyModel
 from db_helpers.models.session_model import SessionModel
 from db_helpers.repository.sessions_db import update_session_source_file
-from db_helpers.repository.raw_articles_db import replace_raw_articles
-from db_helpers.repository.tagged_articles_db import delete_tagged_articles
+from db_helpers.repository.raw_articles_db import add_new_raw_articles, get_raw_articles
 from data_source_helpers.google_news_rss import google_news_rss_scraper
 from data_source_helpers.tavily_helper import tavily_api_helper
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,36 +23,36 @@ class FetchingService():
         self.UTM_KEYS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "_hsenc", "_hsmi"}
 
     def extract_workflow_rss_queries(self, session: SessionModel) -> list[str]:
-        """Pull the Google News RSS queries configured on the workflow's Data node.
+        """Pull the queries configured on the workflow's api Data nodes.
 
-        Returns the (trimmed, de-duped) query strings only when the Data node has
-        `google_news` among its `api.sources` and at least one query; otherwise [].
+        Returns the (trimmed, de-duped) query strings across every data node with
+        sourceType "api" and at least one data source; otherwise [].
         """
         workflow = session.workflow if isinstance(session.workflow, dict) else {}
         nodes = workflow.get("nodes")
         if not isinstance(nodes, list):
             return []
 
+        seen: set[str] = set()
+        result: list[str] = []
         for node in nodes:
             if not isinstance(node, dict) or node.get("type") != "data":
                 continue
             data = node.get("data") if isinstance(node.get("data"), dict) else {}
-            api = data.get("api") if isinstance(data.get("api"), dict) else {}
-            sources = api.get("sources") if isinstance(api.get("sources"), list) else []
-            queries = api.get("queries") if isinstance(api.get("queries"), list) else []
+            if data.get("sourceType") != "api":
+                continue
+            sources = data.get("data_sources") if isinstance(data.get("data_sources"), list) else []
+            queries = data.get("queries") if isinstance(data.get("queries"), list) else []
             if not sources:
-                return []
+                continue
 
-            seen: set[str] = set()
-            result: list[str] = []
             for q in queries:
                 q = str(q or "").strip()
                 if q and q.lower() not in seen:
                     seen.add(q.lower())
                     result.append(q)
-            return result
 
-        return []
+        return result
 
     def to_source_record(self, article: dict[str, Any], data_source: str = "Google News") -> dict[str, Any]:
         """Shape a SerpAPI article so parse_upload keeps it: it needs a non-empty
@@ -173,8 +172,8 @@ class FetchingService():
 
         # Store the fetched/merged records in the database (raw_articles) instead of a
         # JSON source file on S3. A fresh source invalidates any prior tagged rows.
-        replace_raw_articles(db, session.id, merged_records)
-        delete_tagged_articles(db, session.id)
+        # replace_raw_articles(db, session.id, merged_records)
+        # delete_tagged_articles(db, session.id)
         updated = update_session_source_file(db, session, None)
         logger.info(
             f"Saved {len(merged_records)} record(s) "
@@ -196,8 +195,9 @@ class FetchingService():
 
         selected_data_providers = []
         for item in session.workflow.get("nodes"):
-            if item.get("type") == "data":
-                selected_data_providers = item.get("data", {}).get("api", {}).get("sources")
+            data = item.get("data", {}) if item.get("type") == "data" else {}
+            if data.get("sourceType") == "api":
+                selected_data_providers.extend(data.get("data_sources") or [])
 
         
         pool: list[dict[str, Any]] = []
@@ -258,10 +258,15 @@ class FetchingService():
 
         deduped = self.dedupe_articles(pool)
         logger.info(f"Gathered {len(pool)} article(s) -> {len(deduped)} after dedupe")
-        replace_raw_articles(db, session.id, deduped)
-        delete_tagged_articles(db, session.id)
-        updated = update_session_source_file(db, session, None)
-        return deduped
+        # Keep previously fetched articles; only articles this session hasn't seen
+        # before (by hashed article_id) are added.
+        added = add_new_raw_articles(db, session.project_id, session.id, deduped)
+        logger.info(
+            f"Added {len(added)} new article(s) for session id={session.id}; "
+            f"{len(deduped) - len(added)} already stored"
+        )
+        update_session_source_file(db, session, None)
+        return get_raw_articles(db, session.id)
 
 
 fetching_service = FetchingService()

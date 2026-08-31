@@ -23,19 +23,19 @@ def delete_session(db: Session, session: SessionModel) -> None:
 def create_session(
     db: Session,
     project_id: int,
+    name: str,
     brand_keywords: list[str],
     competitor_keywords: list[str],
     message_keywords: list[str],
-    session_type: SessionType | str = SessionType.UPLOAD,
-    queries: Any | None = None,
+    workflow: Any | None = None,
 ) -> SessionModel:
     new_session = SessionModel(
         project_id=project_id,
+        name=name,
         brand_keywords=brand_keywords,
         competitor_keywords=competitor_keywords,
         message_keywords=message_keywords,
-        session_type=session_type,
-        queries=queries,
+        workflow=workflow,
     )
     db.add(new_session)
     db.commit()
@@ -88,11 +88,10 @@ def update_session_status(db: Session, session: SessionModel, status: str) -> Se
     return session
 
 
-def update_session_workflow(db: Session, session: SessionModel, workflow: Any | None, session_type: SessionType | str = SessionType.UPLOAD) -> SessionModel:
+def update_session_workflow(db: Session, session: SessionModel, workflow: Any | None) -> SessionModel:
     """Persist the visual pipeline graph (nodes + edges) for a session."""
     session.workflow = workflow
     session.status = "Workflow Saved"
-    session.session_type = session_type
     db.commit()
     db.refresh(session)
     return session

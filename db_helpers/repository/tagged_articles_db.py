@@ -107,6 +107,53 @@ def replace_tagged_articles(
     return rows
 
 
+def next_article_ref_number(db: Session, session_id: int) -> int:
+    """The next free "A{n}" number for a session, so a new batch of tagged
+    articles continues the numbering instead of colliding with existing rows.
+
+    Args:
+        db: Database session.
+        session_id: Session to inspect.
+
+    Returns:
+        1 when the session has no tagged rows, else the highest ref number + 1.
+    """
+    refs = (
+        db.query(TaggedArticleModel.article_ref)
+        .filter(TaggedArticleModel.session_id == session_id)
+        .all()
+    )
+    highest = 0
+    for (ref,) in refs:
+        if isinstance(ref, str) and ref.startswith("A") and ref[1:].isdigit():
+            highest = max(highest, int(ref[1:]))
+    return highest + 1
+
+
+def add_tagged_articles(
+    db: Session, session_id: int, articles: list[dict[str, Any]]
+) -> list[TaggedArticleModel]:
+    """Append newly tagged articles, leaving the session's existing rows in place.
+
+    Args:
+        db: Database session.
+        session_id: Session the articles belong to.
+        articles: Freshly tagged article dicts.
+
+    Returns:
+        The inserted rows.
+    """
+    raw_map = _raw_article_id_map(db, session_id)
+    rows = [
+        _row_from_article(session_id, a, _resolve_article_id(a, raw_map))
+        for a in articles
+        if isinstance(a, dict)
+    ]
+    db.add_all(rows)
+    db.commit()
+    return rows
+
+
 def get_tagged_articles(db: Session, session_id: int) -> list[dict[str, Any]]:
     """Return tagged articles for a session as list[dict] — the exact shape the
     charts calculators and the E2B sandbox consume."""

@@ -19,10 +19,13 @@ from db_helpers.repository.sessions_db import (
     update_session_status,
     update_session_tagged_file,
 )
-from db_helpers.repository.raw_articles_db import get_raw_articles
+from db_helpers.repository.raw_articles_db import get_raw_articles, get_untagged_raw_articles
 from db_helpers.repository.tagged_articles_db import (
+    add_tagged_articles as save_tagged_articles,
+    count_tagged_articles,
     delete_tagged_article,
     get_tagged_articles,
+    next_article_ref_number,
     replace_tagged_articles,
     upsert_tagged_article,
 )
@@ -74,7 +77,7 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         # queries). Fetch + merge into the uploaded file, or create a new source
         # file when none was uploaded. No-op when no RSS request is configured.
         if record.session_type == SessionType.QUERY:
-            record, is_fetched = fetching_service.fetch_and_merge_workflow_rss(record, db)
+            record, is_fetched = fetching_service.fetch_and_merge_articles(record, db)
             if is_fetched is False:
                 raise HTTPException(status_code=404, detail="No articles found for the queries")
 
@@ -83,8 +86,13 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
 
         update_session_status(db, record, "Tagging")
 
-        raw = get_raw_articles(db, session_id)
+        # Only tag what hasn't been tagged yet; earlier tagged rows are kept as-is.
+        raw = get_untagged_raw_articles(db, session_id)
         if not raw:
+            if count_tagged_articles(db, session_id):
+                raise HTTPException(
+                    status_code=400, detail="All articles in this session are already tagged."
+                )
             raise HTTPException(status_code=404, detail="No data found in Source File")
 
         brand_keywords = record.brand_keywords or []
@@ -95,7 +103,7 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         project = get_project(db, record.project_id)
         sections_prompt = project.monitoring_sections_prompt if project else None
 
-        articles = clean_articles(raw)
+        articles = clean_articles(raw, start_id=next_article_ref_number(db, session_id))
 
         # Enrich each article with reach (S3 lookup + SimilarWeb fallback). Newly
         # fetched reaches are written back to the S3 reach file in the background.
@@ -123,9 +131,8 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         # final_articles = reorder_by_confidence(tagged_full)
         final_articles = tagged_full
 
-        # Persist tagged articles to the database (tagged_articles). Drop any stale
-        # cached dashboards for this session.
-        replace_tagged_articles(db, session_id, final_articles)
+        # Append to the session's tagged articles; previously tagged rows stay.
+        save_tagged_articles(db, session_id, final_articles)
         # Embed for chat in the background so the response isn't blocked on it.
         background_tasks.add_task(_reindex_for_chat, session_id, record.project_id, final_articles)
         if record.charts_data_file:
@@ -203,52 +210,72 @@ async def tagging_stream(
         def on_fetch_progress(fetched: int) -> None:
             loop.call_soon_threadsafe(fetch_queue.put_nowait, fetched)
         
-        if record.session_type == SessionType.QUERY:
-            await websocket.send_json({"type": "progress", "message": "Fetched articles......"})
-            fetch_task = asyncio.create_task(
-                asyncio.to_thread(
-                    fetching_service.fetch_and_merge_articles,
-                    record,
-                    db,
-                    data_providers_key,
-                    on_fetch_progress,
-                )
+        # if record.session_type == SessionType.QUERY:
+        await websocket.send_json({"type": "progress", "message": "Fetched articles......"})
+        fetch_task = asyncio.create_task(
+            asyncio.to_thread(
+                fetching_service.fetch_and_merge_articles,
+                record,
+                db,
+                data_providers_key,
+                on_fetch_progress,
             )
-            fetch_task.add_done_callback(lambda _: fetch_queue.put_nowait(FETCH_DONE))
+        )
+        fetch_task.add_done_callback(lambda _: fetch_queue.put_nowait(FETCH_DONE))
 
-            fetched_total = 0
-            while True:
-                item = await fetch_queue.get()
-                if item is FETCH_DONE:
-                    break
-                if isinstance(item, int) and item != fetched_total:
-                    fetched_total = item
-                    await websocket.send_json({"type": "fetch_progress", "fetched": fetched_total})
+        fetched_total = 0
+        while True:
+            item = await fetch_queue.get()
+            if item is FETCH_DONE:
+                break
+            if isinstance(item, int) and item != fetched_total:
+                fetched_total = item
+                await websocket.send_json({"type": "fetch_progress", "fetched": fetched_total})
 
-            try:
-                await fetch_task  # re-raise any exception from the fetch thread
-            except ValueError as exc:
-                # "Nothing found" / "no queries" — the pool may still hold untagged
-                # articles from an earlier pass, so carry on and tag those.
-                logger.warning(f"Pool fetch found nothing for session_id={session_id}: {exc}")
-            await websocket.send_json({
-                "type": "progress",
-                "message": f"Fetched {fetched_total} articles — preparing to tag…" if fetched_total else "Fetched articles — preparing to tag…",
-            })
+        try:
+            await fetch_task  # re-raise any exception from the fetch thread
+        except ValueError as exc:
+            # "Nothing found" / "no queries" — the pool may still hold untagged
+            # articles from an earlier pass, so carry on and tag those.
+            logger.warning(f"Pool fetch found nothing for session_id={session_id}: {exc}")
+        await websocket.send_json({
+            "type": "progress",
+            "message": f"Fetched {fetched_total} articles — preparing to tag…" if fetched_total else "Fetched articles — preparing to tag…",
+        })
 
-        if not record.source_file and record.session_type == SessionType.UPLOAD:
-            await websocket.send_json({"type": "error", "detail": "Workflow has no source_file set."})
-            return
+        # if not record.source_file and record.session_type == SessionType.UPLOAD:
+        #     await websocket.send_json({"type": "error", "detail": "Workflow has no source_file set."})
+        #     return
 
         update_session_status(db, record, "Tagging")
 
-        raw = get_raw_articles(db, session_id)
+        # Only tag what hasn't been tagged yet; earlier tagged rows are kept as-is.
+        raw = get_untagged_raw_articles(db, session_id)
         if not raw:
-            await websocket.send_json({"type": "error", "detail": "No data found in Source File"})
-            update_session_status(db, record, "Failed")
+            already_tagged = count_tagged_articles(db, session_id)
+            if not already_tagged:
+                await websocket.send_json(
+                    {"type": "error", "detail": "No data found in Source File"}
+                )
+                update_session_status(db, record, "Failed")
+                return
+
+            # Nothing new to tag — report the session as already complete, using the
+            # same fields the client reads off a normal "complete".
+            logger.info(f"Nothing new to tag for session_id={session_id}; {already_tagged} already tagged")
+            await websocket.send_json({"type": "start", "total_articles": 0})
+            await websocket.send_json(
+                {
+                    "type": "complete",
+                    "total_tagged": 0,
+                    "elapsed_seconds": 0,
+                    "detail": "All articles in this session are already tagged.",
+                }
+            )
+            update_session_status(db, record, "Tagged")
             return
 
-        articles = clean_articles(raw)
+        articles = clean_articles(raw, start_id=next_article_ref_number(db, session_id))
 
         # Enrich with reach off the event loop (S3 lookup + SimilarWeb fallback);
         # the S3 reach-file write-back happens in the background inside get_reach.
@@ -265,10 +292,6 @@ async def tagging_stream(
 
         await websocket.send_json({"type": "start", "total_articles": len(articles)})
 
-        # Link related articles BEFORE tagging so we can skip syndicated copies —
-        # they inherit their main article's tags, so tagging them just wastes
-        # tokens. link_articles sets syndication_of / similar_of on each article;
-        # we tag only mains + similar (everything that isn't a syndicated copy).
         await websocket.send_json({"type": "progress", "message": "Linking related articles…"})
         articles = await asyncio.to_thread(link_articles, articles)
         to_tag = [a for a in articles if not a.get("syndication_of")]
@@ -314,31 +337,20 @@ async def tagging_stream(
         # with their main article's tags copied over.
         tagged_full = merge_tagged_with_syndication(to_tag, syndications, syndications_to_main, tagged)
 
-        # Reorder by Confidence and Reassign Id. reorder_by_confidence remaps the
-        # syndication_of / similar_of pointers (set above) onto the new ids.
-        # final_articles = reorder_by_confidence(tagged_full)
         final_articles = tagged_full
 
-        # Persist tagged articles to the database (tagged_articles). Drop any stale
-        # cached dashboards for this session.
-        replace_tagged_articles(db, session_id, final_articles)
+        # Append to the session's tagged articles; previously tagged rows stay.
+        save_tagged_articles(db, session_id, final_articles)
         # Embed for chat in the background so the client isn't blocked on it; the
         # task is fire-and-forget (it swallows its own errors and touches no request
         # state), so tagging completes immediately.
         asyncio.create_task(
             asyncio.to_thread(_reindex_for_chat, session_id, record.project_id, final_articles)
         )
-        if record.charts_data_file:
-            try:
-                s3_file.delete_file(record.charts_data_file)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to delete stale charts file; continuing.")
-        update_session_tagged_file(db, record, None)
-
+        
         await websocket.send_json(
             {
                 "type": "complete",
-                "tagged_file": "DB",
                 "total_tagged": len(final_articles),
                 "elapsed_seconds": round(time.time() - started, 1),
             }
