@@ -10,7 +10,6 @@ from ai_helpers.article_linker import link_articles
 from configs import logger
 from data_source_helpers.fetching_service_v2 import fetching_service
 from data_source_helpers.newspaper_helper import article_content_fetch
-from db_helpers.models.session_model import SessionType
 from db_helpers.repository.auth_repository.dependencies import get_connection_org_id
 from db_helpers.repository.data_provider_keys_db import get_org_active_data_providers_key
 from db_helpers.repository.sessions_db import (
@@ -76,10 +75,9 @@ def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = De
         # Workflow Data node may request Google News RSS (source google_news +
         # queries). Fetch + merge into the uploaded file, or create a new source
         # file when none was uploaded. No-op when no RSS request is configured.
-        if record.session_type == SessionType.QUERY:
-            record, is_fetched = fetching_service.fetch_and_merge_articles(record, db)
-            if is_fetched is False:
-                raise HTTPException(status_code=404, detail="No articles found for the queries")
+        record, is_fetched = fetching_service.fetch_and_merge_articles(record, db)
+        if is_fetched is False:
+            raise HTTPException(status_code=404, detail="No articles found for the queries")
 
         if not record.source_file:
             raise HTTPException(status_code=400, detail="Workflow has no source_file set.")
