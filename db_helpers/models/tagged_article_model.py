@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -42,7 +43,7 @@ class TaggedArticleModel(Base):
     sentiment = Column(String, nullable=True, index=True)
     theme = Column(String, nullable=True)
     section = Column(String, nullable=True, index=True)
-    reach = Column(Integer, nullable=True)
+    reach = Column(BigInteger, nullable=True)
     priority_watch = Column(Boolean, nullable=False, default=False)
     is_approved_for_monitoring = Column(Boolean, nullable=False, default=False)
     is_approved_for_dashboards = Column(Boolean, nullable=False, default=False)

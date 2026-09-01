@@ -174,10 +174,11 @@ def get_org_active_data_providers_key(db: Session, org_id: int) -> dict[str, str
         org_id: Owning organization id.
 
     Returns:
-        Dict of provider name to decrypted API key.
+        Dict keyed by both lowercased provider name and label, each mapping to the
+        decrypted API key.
     """
     records = (
-        db.query(DataProvidersAPIModel.name, DataProvidersAPIKeyModel.api_key)
+        db.query(DataProvidersAPIModel.name, DataProvidersAPIModel.label, DataProvidersAPIKeyModel.api_key)
         .join(
             DataProvidersAPIKeyModel,
             DataProvidersAPIKeyModel.data_provider_id == DataProvidersAPIModel.id,
@@ -189,7 +190,13 @@ def get_org_active_data_providers_key(db: Session, org_id: int) -> dict[str, str
         )
         .all()
     )
-    return {name.lower(): decrypt_secret(api_key) for name, api_key in records}
+    keys: dict[str, str | None] = {}
+    for name, label, api_key in records:
+        secret = decrypt_secret(api_key)
+        for key in (name, label):
+            if key:
+                keys[key.lower()] = secret
+    return keys
 
 
 def get_org_active_data_providers(db: Session, org_id: int) -> dict[str, str | None]:
