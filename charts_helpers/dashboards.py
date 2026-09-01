@@ -30,7 +30,7 @@ def get_dashboards_chart_data(dashboards: list[str], tagged_articles, brand_keyw
     # =============================================
     # All Other Dashboards ========================
     # =============================================
-    tagged_articles = [item for item in tagged_articles if item.get("is_approved", False)]
+    tagged_articles = [item for item in tagged_articles if item.get("is_approved_for_dashboards", False)]
 
     total_count = chart_calculations.total_count(tagged_articles)
     total_reach = chart_calculations.total_reach(tagged_articles)

@@ -74,7 +74,7 @@ def _apply_article(
     row.section = _str_or_none(article.get("section"))
     row.reach = _to_int(article.get("reach"))
     row.priority_watch = bool(article.get("priority_watch") or False)
-    row.is_approved = bool(article.get("is_approved") or False)
+    row.is_approved_for_dashboards = bool(article.get("is_approved_for_dashboards") or False)
     row.is_approved_for_monitoring = bool(article.get("is_approved_for_monitoring") or False)
     row.data = article
     return row

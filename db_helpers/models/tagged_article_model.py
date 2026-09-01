@@ -38,13 +38,14 @@ class TaggedArticleModel(Base):
     title = Column(Text, nullable=True)
     url = Column(Text, nullable=True)
     date = Column(String, nullable=True, index=True)  # ISO-8601 string; sorts lexically
+    is_relevant = Column(Boolean, nullable=False, default=True, index=True)
     sentiment = Column(String, nullable=True, index=True)
     theme = Column(String, nullable=True)
     section = Column(String, nullable=True, index=True)
     reach = Column(Integer, nullable=True)
     priority_watch = Column(Boolean, nullable=False, default=False)
-    is_approved = Column(Boolean, nullable=False, default=False)
     is_approved_for_monitoring = Column(Boolean, nullable=False, default=False)
+    is_approved_for_dashboards = Column(Boolean, nullable=False, default=False)
 
     # Canonical full article dict.
     data = Column(JSONB, nullable=False)
