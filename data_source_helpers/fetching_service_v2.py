@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session
 from configs import logger
 from db_helpers.models.session_model import SessionModel
 from db_helpers.repository.raw_articles_db import add_new_raw_articles, get_raw_articles
-from data_source_helpers.google_news_rss import google_news_rss_scraper
-from data_source_helpers.tavily_helper import tavily_api_helper
+from data_source_helpers.api_sources.google_news_rss import google_news_rss_scraper
+from data_source_helpers.api_sources.tavily_helper import tavily_api_helper
+from data_source_helpers.api_sources.serp_api_helper import serp_api_helper
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, urljoin
 
@@ -167,24 +168,29 @@ class FetchingService():
             except Exception:
                 logger.exception("on_progress callback failed")
 
-        # Run the three source families concurrently.
-        with ThreadPoolExecutor(max_workers=3) as pool_exec:
-            gn_kwargs: dict[str, Any] = {
-                "language": "en",
-                "country": "us",
-                "on_progress": lambda n: _report("google_news", n),
-                "skip_url": None,
-            }
-            
-            gn_rss_future = pool_exec.submit(
-                google_news_rss_scraper.fetch_google_news_feedparser_boolean_query,
-                queries,
-                **gn_kwargs,
-            )
+        # Run the source families concurrently.
+        with ThreadPoolExecutor(max_workers=4) as pool_exec:
+            futures = []
+            # =====================================================
+            # Google News Rss
+            if "google_news" in selected_data_providers:
+                gn_kwargs: dict[str, Any] = {
+                    "language": "en",
+                    "country": "us",
+                    "on_progress": lambda n: _report("google_news", n),
+                    "skip_url": None,
+                }
+                
+                gn_rss_future = pool_exec.submit(
+                    google_news_rss_scraper.fetch_google_news_feedparser_boolean_query,
+                    queries,
+                    **gn_kwargs,
+                )
 
-            futures = [("google_news_rss", gn_rss_future)]
+                futures = [("google_news_rss", gn_rss_future)]
 
-            # Taviliy Fetcher
+            # =====================================================
+            # Taviliy API Fetcher
             if data_providers_key.get("tavily") and "tavily" in selected_data_providers:
                 tavily_api_key = data_providers_key.get("tavily")
                 tavily_future = pool_exec.submit(
@@ -194,6 +200,30 @@ class FetchingService():
                     on_progress=lambda n: _report("tavily", n)
                 )
                 futures.append(("tavily", tavily_future))
+
+            # =====================================================
+            # Serp API Google Search Fetcher
+            # if data_providers_key.get("serp_google_search") and "serp_google_search" in selected_data_providers:
+            #     serp_api_key = data_providers_key.get("serp_google_search")
+            #     serp_search_future = pool_exec.submit(
+            #         serp_api_helper.fetch_google_search_articles,
+            #         serp_api_key,
+            #         queries,
+            #         on_progress=lambda n: _report("serp_google_search", n)
+            #     )
+            #     futures.append(("serp_google_search", serp_search_future))
+
+            # =====================================================
+            # Serp API Google News Fetcher
+            if data_providers_key.get("serp_google_news") and "serp_google_news" in selected_data_providers:
+                serp_api_key = data_providers_key.get("serp_google_news")
+                serp_news_future = pool_exec.submit(
+                    serp_api_helper.fetch_google_news_articles,
+                    serp_api_key,
+                    queries,
+                    on_progress=lambda n: _report("serp_google_news", n)
+                )
+                futures.append(("serp_google_news", serp_news_future))
 
             for tag, fut in futures:
                 try:

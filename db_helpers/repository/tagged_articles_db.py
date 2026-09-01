@@ -36,14 +36,29 @@ def _resolve_article_id(article: dict[str, Any], raw_map: Optional[dict[str, str
     return _article_id_from_url(url)
 
 
+# Postgres bigint bounds; a value past these aborts the whole insert batch.
+_BIGINT_MAX = 2**63 - 1
+_BIGINT_MIN = -(2**63)
+
+
 def _to_int(value: Any) -> Optional[int]:
-    """Coerce a reach-like value to int, tolerating None / "" / floats / junk."""
+    """Coerce a reach-like value to int, tolerating None / "" / floats / junk.
+
+    Args:
+        value: Raw reach value.
+
+    Returns:
+        Int clamped to Postgres bigint range, or None when unusable.
+    """
     if value is None or value == "":
         return None
     try:
-        return int(float(value))
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return max(_BIGINT_MIN, min(_BIGINT_MAX, int(number)))
 
 
 def _str_or_none(value: Any) -> Optional[str]:
