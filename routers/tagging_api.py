@@ -62,108 +62,6 @@ def _reindex_for_chat(session_id: int, project_id: int | None, articles: list[di
         )
 
 
-@router.post("/tagging/{session_id}")
-def tagging(session_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> Any:
-    try:
-        logger.info(f"Tagging process started for session_id={session_id}")
-
-        record = get_session(db, session_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Workflow not found.")
-
-        # Workflow Data node may request Google News RSS (source google_news +
-        # queries). Fetch + merge into the uploaded file, or create a new source
-        # file when none was uploaded. No-op when no RSS request is configured.
-        record, is_fetched = fetching_service.fetch_and_merge_articles(record, db)
-        if is_fetched is False:
-            raise HTTPException(status_code=404, detail="No articles found for the queries")
-
-        if not record.source_file:
-            raise HTTPException(status_code=400, detail="Workflow has no source_file set.")
-
-        update_session_status(db, record, "Tagging")
-
-        # Only tag what hasn't been tagged yet; earlier tagged rows are kept as-is.
-        raw = get_untagged_raw_articles(db, session_id)
-        if not raw:
-            if count_tagged_articles(db, session_id):
-                raise HTTPException(
-                    status_code=400, detail="All articles in this session are already tagged."
-                )
-            raise HTTPException(status_code=404, detail="No data found in Source File")
-
-        brand_keywords = record.brand_keywords or []
-        competitor_keywords = record.competitor_keywords or []
-        if brand_keywords:
-            logger.info(f"Aspect-based sentiment for brand keywords: {brand_keywords}")
-
-        project = get_project(db, record.project_id)
-        sections_prompt = project.monitoring_sections_prompt if project else None
-
-        articles = clean_articles(raw, start_id=next_article_ref_number(db, session_id))
-
-        # Enrich each article with reach (S3 lookup + SimilarWeb fallback). Newly
-        # fetched reaches are written back to the S3 reach file in the background.
-        articles = get_reach(articles)
-
-        # Link related articles BEFORE tagging so we can skip syndicated copies —
-        # they inherit their main article's tags, so tagging them just wastes
-        # tokens. Tag only mains + similar (everything that isn't a syndicated copy).
-        articles = link_articles(articles)
-        to_tag = [a for a in articles if not a.get("syndication_of")]
-        copies = [a for a in articles if a.get("syndication_of")]
-        copy_to_main = {a["id"]: a.get("syndication_of", "") for a in copies}
-        logger.info(f"Tagging {len(to_tag)} articles; {len(copies)} syndicated copies inherit their main's tags")
-
-        logger.info(f"Running AI tagging")
-        started = time.time()
-        tagged = tag_articles(articles, brand_keywords, competitor_keywords, sections_prompt=sections_prompt)
-        logger.info(f"Tagging completed in {time.time() - started:.1f}s")
-        
-        # Merge tags onto the tagged articles, then attach the syndicated copies
-        # with their main article's tags copied over.
-        tagged_full = merge_tagged_with_syndication(to_tag, copies, copy_to_main, tagged)
-
-        # Reorder by Confidence and Reassign Id
-        # final_articles = reorder_by_confidence(tagged_full)
-        final_articles = tagged_full
-
-        # Append to the session's tagged articles; previously tagged rows stay.
-        save_tagged_articles(db, session_id, final_articles)
-        # Embed for chat in the background so the response isn't blocked on it.
-        background_tasks.add_task(_reindex_for_chat, session_id, record.project_id, final_articles)
-        if record.charts_data_file:
-            s3_file.delete_file(record.charts_data_file)
-
-        return final_articles
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"Tagging process failed for session_id={session_id}")
-        update_session_status(db, record, "Failed")
-        raise HTTPException(status_code=500, detail=f"Tagging process failed: {exc}") from exc
-
-
-@router.get("/tagging/{session_id}")
-def get_tagged_articles_api(session_id: int, db: Session = Depends(get_db)) -> Any:
-    try:
-        logger.info("")
-        logger.info(f"Fetching tagged articles for session_id={session_id}")
-
-        record = get_session(db, session_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Workflow not found.")
-        # if not record.tagged_file:
-        #     raise HTTPException(status_code=404, detail="No tagged file found for this session.")
-
-        return get_tagged_articles(db, session_id)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(f"Fetching tagged articles failed for session_id={session_id}")
-        raise HTTPException(status_code=500, detail=f"Fetching tagged articles failed: {exc}") from exc
-
-
 @router.websocket("/ws/tagging")
 async def tagging_stream(
     websocket: WebSocket,
@@ -238,10 +136,6 @@ async def tagging_stream(
             "type": "progress",
             "message": f"Fetched {fetched_total} articles — preparing to tag…" if fetched_total else "Fetched articles — preparing to tag…",
         })
-
-        # if not record.source_file and record.session_type == SessionType.UPLOAD:
-        #     await websocket.send_json({"type": "error", "detail": "Workflow has no source_file set."})
-        #     return
 
         update_session_status(db, record, "Tagging")
 
@@ -366,6 +260,26 @@ async def tagging_stream(
             await websocket.close()
         except Exception:
             pass
+
+
+@router.get("/tagging/{session_id}")
+def get_tagged_articles_api(session_id: int, db: Session = Depends(get_db)) -> Any:
+    try:
+        logger.info("")
+        logger.info(f"Fetching tagged articles for session_id={session_id}")
+
+        record = get_session(db, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Workflow not found.")
+        # if not record.tagged_file:
+        #     raise HTTPException(status_code=404, detail="No tagged file found for this session.")
+
+        return get_tagged_articles(db, session_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Fetching tagged articles failed for session_id={session_id}")
+        raise HTTPException(status_code=500, detail=f"Fetching tagged articles failed: {exc}") from exc
 
 
 @router.put("/tagging/{session_id}")
@@ -656,8 +570,12 @@ def approve_tagged_articles(
     payload: ApproveRequest,
     db: Session = Depends(get_db),
 ) -> Any:
-    """Set the `is_approved` flag on the given articles in the session's tagged file.
-    Approval is review metadata only — it does not affect dashboards."""
+    """Set an approval flag on the given articles.
+
+    `for_monitoring` targets `is_approved_for_monitoring` (the Media Monitoring
+    dashboard) and also sets `is_approved_for_dashboards`, so approving for
+    monitoring includes the article in the other dashboards too. Un-approving for
+    monitoring leaves `is_approved_for_dashboards` untouched."""
     try:
         if not payload.ids:
             raise HTTPException(status_code=400, detail="No article ids provided.")
@@ -665,20 +583,22 @@ def approve_tagged_articles(
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
-        # if not record.tagged_file:
-        #     raise HTTPException(status_code=404, detail="No tagged file found for this session.")
-
+        
         articles = get_tagged_articles(db, session_id)
 
         # Media Monitoring approves into a separate flag so the two review flows
         # don't clobber each other's approvals.
-        field = "is_approved_for_monitoring" if payload.for_monitoring else "is_approved"
+        field = "is_approved_for_monitoring" if payload.for_monitoring else "is_approved_for_dashboards"
 
         id_set = set(payload.ids)
         approved: list[dict] = []
         for a in articles:
             if isinstance(a, dict) and a.get("id") in id_set:
                 a[field] = payload.is_approved
+                # Approving for monitoring implies dashboard approval. Un-approving
+                # doesn't cascade — the dashboard review owns that flag from there.
+                if payload.for_monitoring and payload.is_approved:
+                    a["is_approved_for_dashboards"] = True
                 approved.append(a)
         approved_ids = [a.get("id") for a in approved]
 
@@ -690,8 +610,19 @@ def approve_tagged_articles(
             upsert_tagged_article(db, session_id, a)
         invalidate_session_charts(db, record)
 
-        logger.info(f"Set {field}={payload.is_approved} on {len(approved_ids)} article(s) for session_id={session_id}")
-        return {"approved_ids": approved_ids, "not_found_ids": not_found_ids, "is_approved": payload.is_approved, "field": field}
+        cascaded = payload.for_monitoring and payload.is_approved
+        logger.info(
+            f"Set {field}={payload.is_approved} on {len(approved_ids)} article(s) "
+            f"for session_id={session_id}"
+            + (" (is_approved_for_dashboards cascaded)" if cascaded else "")
+        )
+        return {
+            "approved_ids": approved_ids,
+            "not_found_ids": not_found_ids,
+            "is_approved": payload.is_approved,
+            "field": field,
+            "cascaded_to_dashboards": cascaded,
+        }
     except HTTPException:
         raise
     except Exception as exc:

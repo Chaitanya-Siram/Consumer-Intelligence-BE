@@ -71,9 +71,6 @@ async def agent_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> N
         if record is None:
             await websocket.send_json({"type": "error", "detail": "Session not found."})
             return
-        if not record.tagged_file:
-            await websocket.send_json({"type": "error", "detail": "No tagged file for this session; run the tagging agent first."})
-            return
 
         await websocket.send_json({"type": "start", "session_id": session_id})
 

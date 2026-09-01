@@ -69,7 +69,13 @@ class ApproveRequest(BaseModel):
 
     `for_monitoring` selects which approval flag to set: the Media Monitoring
     review popup approves into `is_approved_for_monitoring`, every other review
-    into `is_approved`. The two are independent."""
+    into `is_approved_for_dashboards`. Approving for monitoring also sets
+    `is_approved_for_dashboards`, so a monitoring-approved article shows in the
+    dashboards too; un-approving for monitoring leaves that flag as the dashboard
+    review left it.
+
+    `is_approved` is the value to set (approve when true, un-approve when
+    false) — not a column name."""
     ids: list[str]
     is_approved: bool = True
     for_monitoring: bool = False
