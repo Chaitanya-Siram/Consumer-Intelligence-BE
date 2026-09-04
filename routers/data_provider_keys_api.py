@@ -1,14 +1,11 @@
 from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
 from configs import logger
 from db_helpers.database import get_db
 from db_helpers.models.data_providers_model import *
-from db_helpers.models.user_model import CurrentUser, UserModel
+from db_helpers.models.user_model import CurrentUser
 from db_helpers.repository.auth_repository.crypto import mask_secret
 from db_helpers.repository.auth_repository.dependencies import (
     ORG_ADMIN_EXC,
@@ -16,6 +13,9 @@ from db_helpers.repository.auth_repository.dependencies import (
     require_org_admin,
 )
 from db_helpers.repository.data_provider_keys_db import (
+    _CREDENTIAL_FIELDS,
+    _check_required_credentials,
+    _merged_credentials,
     create_provider_key,
     delete_provider_key,
     get_org_active_data_providers,
@@ -64,6 +64,7 @@ def create(
         org_id = payload.org_id
         if not current_user.is_superadmin:
             org_id = current_user.org_id
+        _check_required_credentials(db, payload.data_provider_id, payload)
         provider_key = create_provider_key(
             db,
             org_id=org_id,
@@ -129,8 +130,19 @@ def update(
         raise HTTPException(status_code=404, detail="No record found.")
 
     fields = payload.model_dump(exclude_unset=True)
+    # A blank secret means "leave it alone" (the field is disabled or untouched in
+    # the form), never "erase the stored one".
+    for field in _CREDENTIAL_FIELDS:
+        if field in fields and fields[field] is None:
+            del fields[field]
     if not fields:
         raise HTTPException(status_code=400, detail="No fields provided to update.")
+
+    _check_required_credentials(
+        db,
+        fields.get("data_provider_id", record.data_provider_id),
+        _merged_credentials(record, fields),
+    )
 
     try:
         provider_key = update_provider_key(db, record, **fields)

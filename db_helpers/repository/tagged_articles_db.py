@@ -36,29 +36,8 @@ def _resolve_article_id(article: dict[str, Any], raw_map: Optional[dict[str, str
     return _article_id_from_url(url)
 
 
-# Postgres bigint bounds; a value past these aborts the whole insert batch.
-_BIGINT_MAX = 2**63 - 1
-_BIGINT_MIN = -(2**63)
-
-
-def _to_int(value: Any) -> Optional[int]:
-    """Coerce a reach-like value to int, tolerating None / "" / floats / junk.
-
-    Args:
-        value: Raw reach value.
-
-    Returns:
-        Int clamped to Postgres bigint range, or None when unusable.
-    """
-    if value is None or value == "":
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(number) or math.isinf(number):
-        return None
-    return max(_BIGINT_MIN, min(_BIGINT_MAX, int(number)))
+# Kept in their columns only, stripped out of `data` to keep the JSON small.
+_COLUMN_ONLY_FIELDS = ("title", "content")
 
 
 def _str_or_none(value: Any) -> Optional[str]:
@@ -77,22 +56,34 @@ def _apply_article(
     article: dict[str, Any],
     article_id: Optional[str] = None,
 ) -> TaggedArticleModel:
-    """Populate a row's promoted columns + canonical `data` from an article dict."""
+    """Populate a row's promoted columns + `data` from an article dict."""
     row.session_id = session_id
     row.article_id = article_id
     row.article_ref = str(article.get("id") or "")
     row.title = _str_or_none(article.get("title"))
+    row.content = _str_or_none(article.get("content"))
     row.url = _str_or_none(article.get("url"))
     row.date = _str_or_none(article.get("date")) or None
-    row.sentiment = _str_or_none(article.get("sentiment"))
-    row.theme = _str_or_none(article.get("theme"))
-    row.section = _str_or_none(article.get("section"))
-    row.reach = _to_int(article.get("reach"))
-    row.priority_watch = bool(article.get("priority_watch") or False)
     row.is_approved_for_dashboards = bool(article.get("is_approved_for_dashboards") or False)
     row.is_approved_for_monitoring = bool(article.get("is_approved_for_monitoring") or False)
-    row.data = article
+    # title/content live in their columns only; everything else stays in the JSON.
+    row.data = {k: v for k, v in article.items() if k not in _COLUMN_ONLY_FIELDS}
     return row
+
+
+def article_dict(row: TaggedArticleModel) -> dict[str, Any]:
+    """Rebuild the full article dict from a row (`data` + the column-only fields).
+
+    Args:
+        row: Tagged article row.
+
+    Returns:
+        The article dict downstream consumers expect.
+    """
+    article = dict(row.data or {})
+    article["title"] = row.title
+    article["content"] = row.content
+    return article
 
 
 def _row_from_article(
@@ -178,7 +169,7 @@ def get_tagged_articles(db: Session, session_id: int) -> list[dict[str, Any]]:
         .order_by(TaggedArticleModel.id)
         .all()
     )
-    return [row.data for row in rows]
+    return [article_dict(row) for row in rows]
 
 
 def get_tagged_article(

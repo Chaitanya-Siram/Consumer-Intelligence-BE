@@ -31,7 +31,8 @@ class TavilyAPIHelper():
             "group": article.get("group", ""),
             "query": article.get("query", ""),
             "author": article.get("author", ""),
-            "data_source": "Tavily"
+            "data_source": "Tavily",
+            "media_type": "News"
         }
 
     def get_tavily_articles(self, api_key: str, query: str):

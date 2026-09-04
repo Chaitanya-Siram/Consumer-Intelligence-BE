@@ -62,6 +62,78 @@ def parse_boolean_query(query: str) -> list[str]:
     return result
 
 
+def split_boolean_query(query: str) -> dict[str, list[str]]:
+    """Split a boolean query into its OR / AND / NOT terms.
+
+    For platforms whose search takes a plain keyword instead of a boolean
+    expression: the OR terms are searched one at a time, then AND/NOT are applied
+    to the results locally. A term with no operator before it counts as an OR term.
+
+    Args:
+        query: Boolean query string, e.g. '("Acme" OR Acme Corp) AND launch NOT hiring'.
+
+    Returns:
+        Dict with "or", "and" and "not" term lists.
+    """
+    cleaned = (query or "").replace("(", " ").replace(")", " ")
+    # Keep the operators so each term can be attributed to the one preceding it.
+    tokens = re.split(r"\b(AND|OR|NOT)\b", cleaned)
+
+    groups: dict[str, list[str]] = {"or": [], "and": [], "not": []}
+    seen: dict[str, set[str]] = {"or": set(), "and": set(), "not": set()}
+    bucket = "or"
+    for token in tokens:
+        upper = token.strip().upper()
+        if upper in ("AND", "OR", "NOT"):
+            bucket = upper.lower()
+            continue
+        term = token.strip().strip('"').strip()
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen[bucket]:
+            continue
+        seen[bucket].add(key)
+        groups[bucket].append(term)
+    return groups
+
+
+def contains_term(term: str, haystack: str) -> bool:
+    """Whether a term appears in the text as a whole word.
+
+    Args:
+        term: Term or phrase to look for.
+        haystack: Text to search.
+
+    Returns:
+        True when the term is present.
+    """
+    pattern = r"(?<!\w)" + re.escape(term) + r"(?!\w)"
+    try:
+        return re.search(pattern, haystack, re.IGNORECASE) is not None
+    except re.error:
+        return term.lower() in haystack.lower()
+
+
+def matches_boolean_query(groups: dict[str, list[str]], title: str | None, content: str | None) -> bool:
+    """Apply the AND / NOT parts of a split query to one article.
+
+    The OR terms are what was searched for, so they are not re-checked here.
+
+    Args:
+        groups: Output of split_boolean_query.
+        title: Article title.
+        content: Article body/description.
+
+    Returns:
+        True when the article satisfies every AND term and no NOT term.
+    """
+    haystack = f"{title or ''} {content or ''}"
+    if any(contains_term(t, haystack) for t in groups.get("not", [])):
+        return False
+    return all(contains_term(t, haystack) for t in groups.get("and", []))
+
+
 def find_matched_keywords(query: str, title: str | None, content: str | None) -> list[str]:
     """
     Return the query's terms that actually appear in the article.

@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated, Optional
+from pydantic import BaseModel, BeforeValidator, ConfigDict
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -35,7 +35,7 @@ class DataProvidersAPIKeyModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     data_provider_id = Column(Integer, ForeignKey("data_providers.id", ondelete="CASCADE"), nullable=False)
-    api_key = Column(String, nullable=False)
+    api_key = Column(String, nullable=True)
     username = Column(String, nullable=True)
     password = Column(String, nullable=True)
     created_at = Column(DateTime, default=func.now())
@@ -72,17 +72,29 @@ class DataProvidersAPIKeyResponse(BaseModel):
     is_active: bool = True
 
 
+def _blank_to_none(value: Optional[str]) -> Optional[str]:
+    """Treat a blank credential field as absent — providers that authenticate with
+    username/password send api_key as "" because the input is disabled."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+BlankToNone = Annotated[Optional[str], BeforeValidator(_blank_to_none)]
+
+
 class DataProviderKeyCreate(BaseModel):
     org_id: int
     data_provider_id: int
-    api_key: str = Field(..., min_length=1)
-    username: Optional[str] = None
-    password: Optional[str] = None
+    api_key: BlankToNone = None
+    username: BlankToNone = None
+    password: BlankToNone = None
 
 
 class DataProviderKeyUpdate(BaseModel):
     data_provider_id: Optional[int] = None
-    api_key: Optional[str] = Field(default=None, min_length=1)
-    username: Optional[str] = None
-    password: Optional[str] = None
+    api_key: BlankToNone = None
+    username: BlankToNone = None
+    password: BlankToNone = None
     is_active: Optional[bool] = None
