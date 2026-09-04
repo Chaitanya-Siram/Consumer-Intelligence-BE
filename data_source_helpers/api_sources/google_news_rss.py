@@ -104,7 +104,8 @@ class GoogleNewsRssScraper:
             "group": article.get("group", ""),
             "query": article.get("query", ""),
             "author": article.get("author", ""),
-            "data_source": "Google News"
+            "data_source": "Google News",
+            "media_type": "News"
         }
 
     def call_feedparser_google_news_rss_query(

@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from db_helpers.models.data_providers_model import (
@@ -166,19 +169,25 @@ def get_decrypted_credentials(provider_details: DataProvidersAPIKeyModel) -> dic
     }
 
 
-def get_org_active_data_providers_key(db: Session, org_id: int) -> dict[str, str | None]:
-    """Map provider name to plaintext API key for an org's active credentials.
+def get_org_active_data_providers_key(db: Session, org_id: int) -> dict[str, dict[str, str | None]]:
+    """Map provider name to plaintext credentials for an org's active providers.
 
     Args:
         db: Database session.
         org_id: Owning organization id.
 
     Returns:
-        Dict keyed by both lowercased provider name and label, each mapping to the
-        decrypted API key.
+        Dict keyed by both lowercased provider name and label, each mapping to a
+        dict of decrypted api_key, username and password.
     """
     records = (
-        db.query(DataProvidersAPIModel.name, DataProvidersAPIModel.label, DataProvidersAPIKeyModel.api_key)
+        db.query(
+            DataProvidersAPIModel.name,
+            DataProvidersAPIModel.label,
+            DataProvidersAPIKeyModel.api_key,
+            DataProvidersAPIKeyModel.username,
+            DataProvidersAPIKeyModel.password,
+        )
         .join(
             DataProvidersAPIKeyModel,
             DataProvidersAPIKeyModel.data_provider_id == DataProvidersAPIModel.id,
@@ -190,12 +199,16 @@ def get_org_active_data_providers_key(db: Session, org_id: int) -> dict[str, str
         )
         .all()
     )
-    keys: dict[str, str | None] = {}
-    for name, label, api_key in records:
-        secret = decrypt_secret(api_key)
+    keys: dict[str, dict[str, str | None]] = {}
+    for name, label, api_key, username, password in records:
+        credentials = {
+            "api_key": decrypt_secret(api_key),
+            "username": decrypt_secret(username),
+            "password": decrypt_secret(password),
+        }
         for key in (name, label):
             if key:
-                keys[key.lower()] = secret
+                keys[key.lower()] = credentials
     return keys
 
 
@@ -225,3 +238,69 @@ def get_org_active_data_providers(db: Session, org_id: int) -> dict[str, str | N
     default_data = {"Google News": "google_news"}
     active = {name: label.lower() for name, label in records}
     return {**default_data, **active}
+
+
+_CREDENTIAL_FIELDS = ("api_key", "username", "password")
+
+
+def _required_fields(provider: DataProvidersAPIModel) -> set[str]:
+    """The credential fields a provider declares as required."""
+    required = provider.credentials_fields_required
+    if isinstance(required, dict):
+        return {k for k, v in required.items() if v}
+    if isinstance(required, list):
+        return {f for f in required if isinstance(f, str)}
+    return set()
+
+
+def _check_required_credentials(db: Session, data_provider_id: int, payload) -> None:
+    """Reject a credential set missing the fields its provider requires.
+
+    Args:
+        db: Database session.
+        data_provider_id: Provider the credentials are for.
+        payload: Create/update payload carrying the credential fields.
+
+    Raises:
+        HTTPException: 400 when a required field is blank, or nothing was given.
+    """
+    provider = (
+        db.query(DataProvidersAPIModel)
+        .filter(DataProvidersAPIModel.id == data_provider_id)
+        .first()
+    )
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Data provider not found.")
+
+    required = _required_fields(provider) & set(_CREDENTIAL_FIELDS)
+    missing = [f for f in required if not getattr(payload, f, None)]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(sorted(missing))} required for {provider.name}.",
+        )
+    # A provider that declares nothing still needs at least one credential.
+    if not required and not any(getattr(payload, f, None) for f in _CREDENTIAL_FIELDS):
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of api_key, username or password is required.",
+        )
+
+
+class _Credentials(SimpleNamespace):
+    """The credential values a row will hold once an update is applied."""
+
+
+def _merged_credentials(record: DataProvidersAPIKeyModel, fields: dict) -> _Credentials:
+    """The credentials after `fields` is applied, for validating a partial update.
+
+    Args:
+        record: The stored row (its secrets are encrypted, presence is what matters).
+        fields: The incoming update, blanks already removed.
+
+    Returns:
+        An object exposing api_key, username and password.
+    """
+    return _Credentials(
+        **{f: fields.get(f, getattr(record, f)) for f in _CREDENTIAL_FIELDS}
+    )

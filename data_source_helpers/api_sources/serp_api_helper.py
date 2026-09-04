@@ -206,6 +206,7 @@ class SerpAPIHelper:
             "author": article.get("author", ""),
             "keyword_matched": article.get("keyword_matched", []),
             "data_source": data_source,
+            "media_type": "News"
         }
 
     def get_google_news_articles(

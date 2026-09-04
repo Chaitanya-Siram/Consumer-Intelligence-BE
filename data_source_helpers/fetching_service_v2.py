@@ -4,6 +4,7 @@ import threading
 from typing import Any
 from sqlalchemy.orm import Session
 from configs import logger
+from data_source_helpers.api_sources.phyllo_insight_helper import phyllo_insight_api_helper
 from db_helpers.models.session_model import SessionModel
 from db_helpers.repository.raw_articles_db import add_new_raw_articles, get_raw_articles
 from data_source_helpers.api_sources.google_news_rss import google_news_rss_scraper
@@ -14,6 +15,20 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, urljoin
 
 
 GOOGLE_NEWS_SOURCE = "google_news"
+
+
+def _credentials(data_providers_key: dict, provider: str) -> dict[str, str | None]:
+    """One provider's credentials from the org's credential map.
+
+    Args:
+        data_providers_key: Provider name/label -> credentials dict.
+        provider: Provider label to look up.
+
+    Returns:
+        Dict with api_key, username and password; empty when unconfigured.
+    """
+    credentials = data_providers_key.get(provider)
+    return credentials if isinstance(credentials, dict) else {}
 
 
 class FetchingService():
@@ -135,7 +150,7 @@ class FetchingService():
         self,
         session: SessionModel,
         db: Session,
-        data_providers_key: dict,
+        data_providers_key: dict[str, dict[str, str | None]],
         on_progress=None,
     ):
         queries = self.extract_workflow_rss_queries(session)
@@ -168,8 +183,9 @@ class FetchingService():
             except Exception:
                 logger.exception("on_progress callback failed")
 
-        # Run the source families concurrently.
-        with ThreadPoolExecutor(max_workers=4) as pool_exec:
+        # Run the source families concurrently — one worker per source, since each
+        # blocks for minutes (Phyllo polls a job until it finishes).
+        with ThreadPoolExecutor(max_workers=8) as pool_exec:
             futures = []
             # =====================================================
             # Google News Rss
@@ -191,11 +207,11 @@ class FetchingService():
 
             # =====================================================
             # Taviliy API Fetcher
-            if data_providers_key.get("tavily") and "tavily" in selected_data_providers:
-                tavily_api_key = data_providers_key.get("tavily")
+            tavily_credentials = _credentials(data_providers_key, "tavily")
+            if tavily_credentials.get("api_key") and "tavily" in selected_data_providers:
                 tavily_future = pool_exec.submit(
                     tavily_api_helper.fetch_tavily_articles,
-                    tavily_api_key,
+                    tavily_credentials["api_key"],
                     queries,
                     on_progress=lambda n: _report("tavily", n)
                 )
@@ -203,27 +219,80 @@ class FetchingService():
 
             # =====================================================
             # Serp API Google Search Fetcher
-            # if data_providers_key.get("serp_google_search") and "serp_google_search" in selected_data_providers:
-            #     serp_api_key = data_providers_key.get("serp_google_search")
-            #     serp_search_future = pool_exec.submit(
-            #         serp_api_helper.fetch_google_search_articles,
-            #         serp_api_key,
-            #         queries,
-            #         on_progress=lambda n: _report("serp_google_search", n)
-            #     )
-            #     futures.append(("serp_google_search", serp_search_future))
+            serp_search_credentials = _credentials(data_providers_key, "serp_google_search")
+            if serp_search_credentials.get("api_key") and "serp_google_search" in selected_data_providers:
+                serp_search_future = pool_exec.submit(
+                    serp_api_helper.fetch_google_search_articles,
+                    serp_search_credentials["api_key"],
+                    queries,
+                    on_progress=lambda n: _report("serp_google_search", n)
+                )
+                futures.append(("serp_google_search", serp_search_future))
 
             # =====================================================
             # Serp API Google News Fetcher
-            if data_providers_key.get("serp_google_news") and "serp_google_news" in selected_data_providers:
-                serp_api_key = data_providers_key.get("serp_google_news")
+            serp_news_credentials = _credentials(data_providers_key, "serp_google_news")
+            if serp_news_credentials.get("api_key") and "serp_google_news" in selected_data_providers:
                 serp_news_future = pool_exec.submit(
                     serp_api_helper.fetch_google_news_articles,
-                    serp_api_key,
+                    serp_news_credentials["api_key"],
                     queries,
                     on_progress=lambda n: _report("serp_google_news", n)
                 )
                 futures.append(("serp_google_news", serp_news_future))
+
+            # =====================================================
+            # Phyllo Twitter Fetcher
+            # Phyllo authenticates with Basic auth: client id / client secret.
+            phyllo_credentials = _credentials(data_providers_key, "phyllo_twitter")
+            if phyllo_credentials.get("username") and phyllo_credentials.get("password") and "phyllo_twitter" in selected_data_providers:
+                phyllo_twitter_future = pool_exec.submit(
+                    phyllo_insight_api_helper.fetch_phyllo_twitter_data,
+                    phyllo_credentials["username"],
+                    phyllo_credentials["password"],
+                    queries,
+                    on_progress=lambda n: _report("phyllo_twitter", n)
+                )
+                futures.append(("phyllo_twitter", phyllo_twitter_future))
+
+            # =====================================================
+            # Phyllo Instagram Fetcher
+            phyllo_ig_credentials = _credentials(data_providers_key, "phyllo_instagram")
+            if phyllo_ig_credentials.get("username") and phyllo_ig_credentials.get("password") and "phyllo_instagram" in selected_data_providers:
+                phyllo_instagram_future = pool_exec.submit(
+                    phyllo_insight_api_helper.fetch_phyllo_instagram_data,
+                    phyllo_ig_credentials["username"],
+                    phyllo_ig_credentials["password"],
+                    queries,
+                    on_progress=lambda n: _report("phyllo_instagram", n)
+                )
+                futures.append(("phyllo_instagram", phyllo_instagram_future))
+
+            # =====================================================
+            # Phyllo Reddit Fetcher
+            phyllo_reddit_credentials = _credentials(data_providers_key, "phyllo_reddit")
+            if phyllo_reddit_credentials.get("username") and phyllo_reddit_credentials.get("password") and "phyllo_reddit" in selected_data_providers:
+                phyllo_reddit_future = pool_exec.submit(
+                    phyllo_insight_api_helper.fetch_phyllo_reddit_data,
+                    phyllo_reddit_credentials["username"],
+                    phyllo_reddit_credentials["password"],
+                    queries,
+                    on_progress=lambda n: _report("phyllo_reddit", n)
+                )
+                futures.append(("phyllo_reddit", phyllo_reddit_future))
+
+            # =====================================================
+            # Phyllo YouTube Fetcher
+            phyllo_youtube_credentials = _credentials(data_providers_key, "phyllo_youtube")
+            if phyllo_youtube_credentials.get("username") and phyllo_youtube_credentials.get("password") and "phyllo_youtube" in selected_data_providers:
+                phyllo_youtube_future = pool_exec.submit(
+                    phyllo_insight_api_helper.fetch_phyllo_youtube_data,
+                    phyllo_youtube_credentials["username"],
+                    phyllo_youtube_credentials["password"],
+                    queries,
+                    on_progress=lambda n: _report("phyllo_youtube", n)
+                )
+                futures.append(("phyllo_youtube", phyllo_youtube_future))
 
             for tag, fut in futures:
                 try:
