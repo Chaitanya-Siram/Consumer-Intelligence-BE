@@ -47,7 +47,32 @@ class PhylloInsightAPIHelper:
             query_meta[query] = {"query": query, "group": group}
         return query_meta
 
-    def create_job(self, username: str, password: str, params: dict):
+    def _date_params(self, work_platform_id: str, recency_hours: int) -> dict:
+        """Build the platform's date filter for a create job request.
+
+        Args:
+            work_platform_id: Phyllo work platform id.
+            recency_hours: How far back the results should reach.
+
+        Returns:
+            Date filter params for the create job payload.
+        """
+        # Only Twitter takes an explicit range; the others take a coarse bucket.
+        if work_platform_id == self.TWITTER_ID:
+            now = datetime.now(timezone.utc)
+            return {
+                "from_date": (now - timedelta(hours=recency_hours)).strftime("%Y-%m-%d"),
+                "to_date": now.strftime("%Y-%m-%d"),
+            }
+        return {"upload_date": "this_week"}
+
+    def create_job(
+        self,
+        username: str,
+        password: str,
+        params: dict,
+        recency_hours: int = envs.DEFAULT_RSS_RECENCY_HOURS,
+    ):
         """
         Create a job to fetch data from the Phyllo Insight API.
 
@@ -55,6 +80,7 @@ class PhylloInsightAPIHelper:
             username (str): Phyllo client id used as the Basic auth username.
             password (str): Phyllo client secret used as the Basic auth password.
             params (dict): Parameters for the API request.
+            recency_hours (int): How far back the results should reach.
 
         Returns:
             Job id string, or None if the request failed.
@@ -63,11 +89,15 @@ class PhylloInsightAPIHelper:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        payload = {
+            **params,
+            **self._date_params(params.get("work_platform_id"), recency_hours),
+        }
         try:
             response = requests.post(
                 self.API_BASE_URL,
                 headers=headers,
-                json=params,
+                json=payload,
                 auth=(username, password),
                 timeout=60,
             )
@@ -190,7 +220,7 @@ class PhylloInsightAPIHelper:
         Returns:
             List of record dicts.
         """
-        job_id = self.create_job(username, password, params)
+        job_id = self.create_job(username, password, params, recency_hours)
         if not job_id:
             return []
         if not self.get_job_status(username, password, job_id):
