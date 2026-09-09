@@ -2,7 +2,7 @@ from datetime import datetime
 import enum
 from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, JSON, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, JSON, Text, func
 from db_helpers.database import Base
 from db_helpers.mutable_json import NestedMutableDict
 
@@ -19,6 +19,8 @@ class SessionModel(Base):
     brand_keywords = Column(JSON, nullable=False)
     competitor_keywords = Column(JSON, nullable=False)
     message_keywords = Column(JSON, nullable=False)
+    relevancy_prompt = Column(Text, nullable=True)
+    relevancy_domains = Column(JSON, nullable=True)
     # Visual pipeline graph (nodes + edges) built in the workflow designer.
     workflow = Column(NestedMutableDict.as_mutable(JSON), nullable=True)
     status = Column(String, nullable=False, default="Created")
@@ -43,6 +45,8 @@ class SessionResponse(BaseModel):
     brand_keywords: list[str] = []
     competitor_keywords: list[str] = []
     message_keywords: list[str] = []
+    relevancy_prompt: Optional[str] = None
+    relevancy_domains: Optional[Any] = None
     queries: Optional[Any] = None
     workflow: Optional[Any] = None
     status: str

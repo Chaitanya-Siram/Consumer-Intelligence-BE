@@ -23,8 +23,6 @@ class TaggedArticleUpdate(BaseModel):
     xai_sentiment_reason: Optional[str] = None
     priority_watch: Optional[bool] = None
     section: Optional[str] = None
-    # Relation links (editable in the review page): the id of the main article
-    # this one is syndicated-from / similar-to. Empty string clears the link.
     syndication_of: Optional[str] = None
     similar_of: Optional[str] = None
     brand_of_interest: Optional[list[str]] = None
@@ -84,3 +82,17 @@ class ApproveRequest(BaseModel):
 class FetchArticleRequest(BaseModel):
     """Fetch a single article by URL and AI-tag it (preview, not yet saved)."""
     url: str
+
+
+class MarkRelevantRequest(BaseModel):
+    """Promote one or more irrelevant articles to relevant (and AI-tag them) by id."""
+    ids: list[str]
+
+
+class MarkIrrelevantRequest(BaseModel):
+    """Demote one or more relevant articles to irrelevant by id.
+
+    Keeps the existing tags — only flips `is_relevant` to False and records the
+    `reason` (required) as the not-relevant reason."""
+    ids: list[str]
+    reason: str = Field(..., min_length=1)

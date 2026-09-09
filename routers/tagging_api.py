@@ -4,8 +4,13 @@ import time
 from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
+from agents.relevancy_agent.relevancy_agent import apply_relevancy
 from ai_helpers.llm_service import tag_articles, tag_articles_streaming
-from ai_helpers.tagging_common import merge_tagged_with_articles, merge_tagged_with_syndication
+from ai_helpers.tagging_common import (
+    build_irrelevant_entries,
+    merge_tagged_with_articles,
+    merge_tagged_with_syndication,
+)
 from ai_helpers.article_linker import link_articles
 from configs import logger
 from data_source_helpers.fetching_service_v2 import fetching_service
@@ -28,7 +33,14 @@ from db_helpers.repository.tagged_articles_db import (
     upsert_tagged_article,
 )
 from db_helpers.repository.projects_db import get_project
-from db_helpers.schemas.tagging_schema import ApproveRequest, FetchArticleRequest, NewTaggedArticle, TaggedArticleUpdate
+from db_helpers.schemas.tagging_schema import (
+    ApproveRequest,
+    FetchArticleRequest,
+    MarkIrrelevantRequest,
+    MarkRelevantRequest,
+    NewTaggedArticle,
+    TaggedArticleUpdate,
+)
 from file_helpers.cleaing_data import clean_articles, reorder_by_confidence
 from file_helpers.s3_file import s3_file
 from file_helpers.similare_web_reach import get_reach
@@ -167,11 +179,6 @@ async def tagging_stream(
 
         articles = clean_articles(raw, start_id=next_article_ref_number(db, session_id))
 
-        # Enrich with reach off the event loop (S3 lookup + SimilarWeb fallback);
-        # the S3 reach-file write-back happens in the background inside get_reach.
-        await websocket.send_json({"type": "progress", "message": "Fetching reach…"})
-        articles = await asyncio.to_thread(get_reach, articles)
-
         brand_keywords = record.brand_keywords or []
         competitor_keywords = record.competitor_keywords or []
         if brand_keywords:
@@ -179,6 +186,31 @@ async def tagging_stream(
 
         project = get_project(db, record.project_id)
         sections_prompt = project.monitoring_sections_prompt if project else None
+
+        # Relevancy gate: annotate is_relevant + reason + confidence and split.
+        # Only relevant articles are tagged; irrelevant ones are stored with blank
+        # tags so the review UI can list and later promote them.
+        await websocket.send_json({"type": "progress", "message": "Checking article relevancy…"})
+        relevant, irrelevant = await asyncio.to_thread(
+            apply_relevancy,
+            articles,
+            brand_keywords,
+            competitor_keywords,
+            record.relevancy_prompt,
+            record.relevancy_domains,
+            None,
+        )
+        articles = relevant
+        if irrelevant:
+            await websocket.send_json({
+                "type": "progress",
+                "message": f"Filtered out {len(irrelevant)} irrelevant article(s); tagging {len(articles)}…",
+            })
+
+        # Enrich with reach off the event loop (S3 lookup + SimilarWeb fallback);
+        # the S3 reach-file write-back happens in the background inside get_reach.
+        await websocket.send_json({"type": "progress", "message": "Fetching reach…"})
+        articles = await asyncio.to_thread(get_reach, articles)
 
         await websocket.send_json({"type": "start", "total_articles": len(articles)})
 
@@ -200,34 +232,41 @@ async def tagging_stream(
 
         logger.info("Running AI tagging (streaming)")
         started = time.time()
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                tag_articles_streaming,
-                to_tag,
-                brand_keywords,
-                competitor_keywords,
-                sections_prompt,
-                on_batch_done,
+        # Only spin up the streaming worker when there is something to tag: a run
+        # whose whole batch was filtered out as irrelevant has nothing to send.
+        if to_tag:
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    tag_articles_streaming,
+                    to_tag,
+                    brand_keywords,
+                    competitor_keywords,
+                    sections_prompt,
+                    on_batch_done,
+                )
             )
-        )
-        # Sentinel is enqueued only after the worker fully returns, so it always
-        # trails every batch payload (call_soon_threadsafe preserves FIFO order).
-        task.add_done_callback(lambda _: queue.put_nowait(DONE))
+            # Sentinel is enqueued only after the worker fully returns, so it always
+            # trails every batch payload (call_soon_threadsafe preserves FIFO order).
+            task.add_done_callback(lambda _: queue.put_nowait(DONE))
 
-        while True:
-            payload = await queue.get()
-            if payload is DONE:
-                break
-            await websocket.send_json(payload)
+            while True:
+                payload = await queue.get()
+                if payload is DONE:
+                    break
+                await websocket.send_json(payload)
 
-        tagged = await task  # re-raise any exception from the tagging thread
+            tagged = await task  # re-raise any exception from the tagging thread
+        else:
+            tagged = []
         logger.info(f"Tagging completed in {time.time() - started:.1f}s")
 
         # Merge tags onto the tagged articles, then attach the syndicated copies
         # with their main article's tags copied over.
         tagged_full = merge_tagged_with_syndication(to_tag, syndications, syndications_to_main, tagged)
 
-        final_articles = tagged_full
+        # Store the irrelevant articles too (blank tags, is_relevant=False) so the
+        # tagged set is complete — the review UI filters on is_relevant.
+        final_articles = tagged_full + build_irrelevant_entries(irrelevant)
 
         # Append to the session's tagged articles; previously tagged rows stay.
         save_tagged_articles(db, session_id, final_articles)
@@ -242,6 +281,8 @@ async def tagging_stream(
             {
                 "type": "complete",
                 "total_tagged": len(final_articles),
+                "relevant_count": len(tagged_full),
+                "irrelevant_count": len(irrelevant),
                 "elapsed_seconds": round(time.time() - started, 1),
             }
         )
@@ -376,6 +417,137 @@ def update_tagged_articles(
     except Exception as exc:
         logger.exception(f"Updating tagged articles failed for session_id={session_id}")
         raise HTTPException(status_code=500, detail=f"Updating tagged articles failed: {exc}") from exc
+
+
+@router.post("/tagging/{session_id}/articles/mark-relevant")
+def mark_articles_relevant(
+    session_id: int,
+    payload: MarkRelevantRequest,
+    db: Session = Depends(get_db),
+) -> Any:
+    """Promote one or more irrelevant articles to relevant and AI-tag them in place.
+
+    Loads the named articles, runs the tagger over them in one batch (sentiment /
+    theme / section / …), sets `is_relevant=True`, replaces the not-relevant
+    reason, writes those rows back, and invalidates any cached dashboards so they
+    rebuild with the newly-relevant articles.
+    Returns the list of updated (now fully-tagged) articles."""
+    try:
+        ids = [str(i) for i in (payload.ids or []) if str(i).strip()]
+        if not ids:
+            raise HTTPException(status_code=400, detail="No article ids provided.")
+
+        record = get_session(db, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+        stored = {a["id"]: a for a in get_tagged_articles(db, session_id) if a.get("id")}
+        # Preserve request order, drop unknown / duplicate ids.
+        seen: set[str] = set()
+        targets: list[dict[str, Any]] = []
+        for aid in ids:
+            if aid in stored and aid not in seen:
+                seen.add(aid)
+                targets.append(stored[aid])
+        if not targets:
+            raise HTTPException(status_code=404, detail=f"None of the provided ids exist: {ids}")
+
+        brand_keywords = record.brand_keywords or []
+        competitor_keywords = record.competitor_keywords or []
+        project = get_project(db, record.project_id)
+        sections_prompt = project.monitoring_sections_prompt if project else None
+
+        # Enrich with reach (best-effort), then AI-tag the whole batch at once.
+        try:
+            enriched = get_reach(targets)
+        except Exception:  # noqa: BLE001 — reach is a nice-to-have, never block promotion
+            logger.warning("Reach enrichment failed during mark-relevant; continuing without it.")
+            enriched = targets
+        tagged = tag_articles(enriched, brand_keywords, competitor_keywords, sections_prompt=sections_prompt)
+        merged_list = merge_tagged_with_articles(enriched, tagged)
+
+        updated: list[dict[str, Any]] = []
+        for merged in merged_list:
+            merged["is_relevant"] = True
+            merged["relevancy_reason"] = "Manually marked relevant."
+            upsert_tagged_article(db, session_id, merged)
+            updated.append(merged)
+
+        # Newly-relevant, tagged articles change the dashboards → drop the cache.
+        if record.charts_data_file:
+            try:
+                s3_file.delete_file(record.charts_data_file)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to delete stale charts file; continuing.")
+        invalidate_session_charts(db, record)
+
+        logger.info(f"Marked {len(updated)} article(s) relevant and tagged them for session_id={session_id}")
+        return updated
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Mark-relevant failed for session_id={session_id}")
+        raise HTTPException(status_code=500, detail=f"Mark-relevant failed: {exc}") from exc
+
+
+@router.post("/tagging/{session_id}/articles/mark-irrelevant")
+def mark_articles_irrelevant(
+    session_id: int,
+    payload: MarkIrrelevantRequest,
+    db: Session = Depends(get_db),
+) -> Any:
+    """Demote one or more relevant articles to irrelevant, keeping their tags.
+
+    Only flips `is_relevant` to False and stores the (required) `reason` as
+    `relevancy_reason` — all tag fields (sentiment / theme / section / …) are left
+    intact, so a later re-promotion keeps them. An irrelevant article can't stay
+    approved, so its approvals are withdrawn. Invalidates cached charts so the
+    dashboards rebuild without these articles.
+    Returns the list of updated articles."""
+    try:
+        ids = [str(i) for i in (payload.ids or []) if str(i).strip()]
+        reason = (payload.reason or "").strip()
+        if not ids:
+            raise HTTPException(status_code=400, detail="No article ids provided.")
+        if not reason:
+            raise HTTPException(status_code=400, detail="A reason is required to move an article to irrelevant.")
+
+        record = get_session(db, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+        stored = {a["id"]: a for a in get_tagged_articles(db, session_id) if a.get("id")}
+
+        updated: list[dict[str, Any]] = []
+        for aid in ids:
+            article = stored.get(aid)
+            if article is None:
+                continue
+            article["is_relevant"] = False
+            article["relevancy_reason"] = reason
+            # Excluded from the dashboards, so it can't stay approved for them.
+            article["is_approved_for_dashboards"] = False
+            article["is_approved_for_monitoring"] = False
+            upsert_tagged_article(db, session_id, article)
+            updated.append(article)
+        if not updated:
+            raise HTTPException(status_code=404, detail=f"None of the provided ids exist: {ids}")
+
+        # These articles leave the dashboards → drop the cached charts.
+        if record.charts_data_file:
+            try:
+                s3_file.delete_file(record.charts_data_file)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to delete stale charts file; continuing.")
+        invalidate_session_charts(db, record)
+
+        logger.info(f"Moved {len(updated)} article(s) to irrelevant for session_id={session_id}")
+        return updated
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Mark-irrelevant failed for session_id={session_id}")
+        raise HTTPException(status_code=500, detail=f"Mark-irrelevant failed: {exc}") from exc
 
 
 _LIST_FIELDS = ("brand_of_interest", "competitors", "other_competitors",

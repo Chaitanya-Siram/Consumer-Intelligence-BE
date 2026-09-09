@@ -18,7 +18,7 @@ def setup_logging(level: str | int | None = None) -> logging.Logger:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(
             logging.Formatter(
-                "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+                "%(asctime)s %(levelname)s [%(funcName)s] %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         )
@@ -46,6 +46,10 @@ class Configs:
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gpt").strip().lower()
     LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "5"))
     LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "20"))
+
+    # Relevancy gate: an article scored below this is irrelevant, whatever the
+    # model answered for is_relevant.
+    RELEVANCY_MIN_CONFIDENCE = float(os.getenv("RELEVANCY_MIN_CONFIDENCE", "0.5"))
 
     # Anthropic Claude
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

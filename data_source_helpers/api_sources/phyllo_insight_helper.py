@@ -72,6 +72,7 @@ class PhylloInsightAPIHelper:
         username: str,
         password: str,
         params: dict,
+        platform: str,
         recency_hours: int = envs.DEFAULT_RSS_RECENCY_HOURS,
     ):
         """
@@ -105,10 +106,10 @@ class PhylloInsightAPIHelper:
             response.raise_for_status()
             return response.json().get("id")
         except Exception as e:
-            logger.error(f"Phyllo Error: create job failed: {e}")
+            logger.error(f"Phyllo Error: create {platform} job failed: {e}")
             return None
 
-    def get_job_status(self, username: str, password: str, job_id: str):
+    def get_job_status(self, username: str, password: str, job_id: str, platform: str,):
         """
         Poll a job until it succeeds, checking every 5 seconds.
 
@@ -131,17 +132,17 @@ class PhylloInsightAPIHelper:
                 response.raise_for_status()
                 status = response.json().get("status")
             except Exception as e:
-                logger.error(f"Phyllo Error: job status failed for {job_id}: {e}")
+                logger.error(f"Phyllo Error: {platform} job status failed for {job_id}: {e}")
                 return None
 
             if status == "SUCCESS":
                 return job_id
             if status in ("FAILURE", "FAILED", "CANCELLED"):
-                logger.error(f"Phyllo Error: job {job_id} ended with status {status}")
+                logger.error(f"Phyllo Error: {platform} job {job_id} ended with status {status}")
                 return None
             time.sleep(_JOB_STATUS_POLL_INTERVAL)
 
-        logger.error(f"Phyllo Error: job {job_id} did not finish within {_JOB_STATUS_TIMEOUT}s")
+        logger.error(f"Phyllo Error: {platform} job {job_id} did not finish within {_JOB_STATUS_TIMEOUT}s")
         return None
 
     def get_data(
@@ -149,6 +150,7 @@ class PhylloInsightAPIHelper:
         username: str,
         password: str,
         job_id: str,
+        platform: str,
         total_records: int = 100,
         recency_hours: int = envs.DEFAULT_RSS_RECENCY_HOURS,
     ):
@@ -191,7 +193,7 @@ class PhylloInsightAPIHelper:
                 response.raise_for_status()
                 batch = response.json().get("data") or []
             except Exception as e:
-                logger.error(f"Phyllo Error: fetch data failed for {job_id}: {e}")
+                logger.error(f"Phyllo Error: fetch {platform} data failed for {job_id}: {e}")
                 break
 
             records.extend(batch)
@@ -205,6 +207,7 @@ class PhylloInsightAPIHelper:
         username: str,
         password: str,
         params: dict,
+        platform: str,
         total_records: int = 100,
         recency_hours: int = envs.DEFAULT_RSS_RECENCY_HOURS,
     ):
@@ -221,12 +224,12 @@ class PhylloInsightAPIHelper:
         Returns:
             List of record dicts.
         """
-        job_id = self.create_job(username, password, params, recency_hours)
+        job_id = self.create_job(username, password, params, platform, recency_hours)
         if not job_id:
             return []
-        if not self.get_job_status(username, password, job_id):
+        if not self.get_job_status(username, password, job_id, platform):
             return []
-        return self.get_data(username, password, job_id, total_records, recency_hours)
+        return self.get_data(username, password, job_id, platform, total_records, recency_hours)
 
     def _map_article(self, item: dict, domain: str) -> dict:
         """Shape one Phyllo record into the pipeline's article dict.
@@ -338,6 +341,7 @@ class PhylloInsightAPIHelper:
                             username,
                             password,
                             {**params, **payload},
+                            platform,
                             total_records,
                             recency_hours,
                         ): q

@@ -1,7 +1,8 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from agents.relevancy_agent.relevancy_domain_extractor import extract_relevancy_domains
 from configs import logger
 from db_helpers.database import get_db
 from db_helpers.models.session_model import SessionResponse
@@ -20,6 +21,7 @@ from db_helpers.repository.sessions_db import (
     delete_session,
     get_session,
     list_sessions_by_project,
+    set_relevancy_prompt,
     update_session_workflow,
 )
 
@@ -27,6 +29,9 @@ router = APIRouter(tags=["sessions"])
 
 class WorkflowUpdate(BaseModel):
     workflow: dict[str, Any]
+
+class RelevancyPromptUpdate(BaseModel):
+    relevancy_prompt: Optional[str] = None
 
 class CreateSessionRequest(BaseModel):
     project_id: int
@@ -134,6 +139,33 @@ def update_workflow(
     # An edited workflow may point at an upload that hasn't been claimed yet.
     claimed = assign_uploads_to_session(db, session_id, file_upload_ids)
     logger.info(f"Saved workflow for session id={session_id}; claimed {claimed} uploaded article(s)")
+    return session
+
+
+@router.post("/sessions/{session_id}/relevancy_prompt", response_model=SessionResponse)
+def add_relevancy_prompt(
+    session_id: int,
+    payload: RelevancyPromptUpdate,
+    db: Session = Depends(get_db),
+) -> SessionResponse:
+    """Set (or clear) the relevancy prompt for a session. The relevancy agent uses
+    it to decide which articles are relevant before tagging.
+
+    The prompt's include/exclude publication domains are extracted by an LLM here,
+    once per save, and stored beside it in `relevancy_domains`. Extraction fails
+    soft: a save always succeeds, with empty lists if the LLM call fails."""
+    session = get_session(db, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    prompt = payload.relevancy_prompt.strip() if payload.relevancy_prompt else None
+    domains = extract_relevancy_domains(prompt) if prompt else None
+    session = set_relevancy_prompt(db, session, prompt, domains)
+    logger.info(
+        f"Updated relevancy prompt for session id={session_id} (set={bool(prompt)}); "
+        f"domains include={len((domains or {}).get('include', []))} "
+        f"exclude={len((domains or {}).get('exclude', []))}"
+    )
     return session
 
 

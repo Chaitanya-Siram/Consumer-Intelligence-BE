@@ -26,7 +26,7 @@ The primary topic category the article is about. Be specific and concise (2-5 wo
 A concise, neutral 2-3 sentence summary of the article ITSELF — a plain summary of what the article reports.
 - Write plain factual prose. NEVER use the words "the article" or "this article" ANYWHERE in the summary — not at the start, not in the middle. Just state the facts directly.
 - Summarize ONLY the article's own content. Do NOT add any meta-commentary about what is or isn't in the article — e.g. do NOT write sentences like "No specific company or brand is cited", "No brand is mentioned", "The brand of interest is not mentioned", or "no connection to the brand is established". Simply omit anything that isn't there; never point out its absence.
-- Do NOT mention the brand of interest's relevance or whether any brand/company is named. Relevancy is handled separately by the relevancy fields — keep it out of the summary entirely.
+- Do NOT mention the brand of interest's relevance or whether any brand/company is named. Relevancy was already decided before these articles reached you — keep it out of the summary entirely.
 - Summary should be written in AP style and be suitable for a corporate communications leader.
 - Capture key points, including statements by spokespersons, CEOs, executives, or leaders where present.
 
@@ -36,15 +36,10 @@ Provide three separate confidence scores:
 - theme_confidence: confidence in the THEME classification.
 - section_category_confidence: confidence in the SECTION CATEGORY assignment.
 
-**RELEVANCY:**
-How relevant the article is to the brand of interest, its competitors, or the broader industry that the brand and competitors operate in. An article directly about the brand is highly relevant; one about a competitor or the shared industry is moderately-to-highly relevant; one with only a passing mention or about an unrelated topic is low relevance.
-- relevancy_confidence: a score from 0-1 reflecting how relevant the article is (1 = squarely about the brand/competitors/industry, 0 = not relevant at all).
-
 **EXPLAINABLE REASONING:**
 Apply contextual reasoning — NOT keyword matching
 - xai_theme_reason: 1-2 short sentences quoting or paraphrasing the specific cues, phrases, or facts about the brand that drove the theme classification.
 - xai_sentiment_reason: 1-2 short sentences quoting or paraphrasing the specific cues, phrases, or facts about the brand that drove the sentiment classification.
-- relevancy_reason: 1-2 short sentences explaining the relevancy score — what makes the article relevant (or not) to the brand, its competitors, or their industry.
 
 **BRAND CONTEXT:**
 - brand_of_interest: which of the provided <brands> are mentioned in the article — either directly or via a synonym, alternate spelling, abbreviation, ticker, handle, parent-brand, or product/sub-brand name. ALWAYS return the EXACT original keyword as it appears in <brands>, NOT the variant found in the article. Example: if <brands> is ['American Airlines'] and the article says 'AmericanAir', return ['American Airlines']. If <brands> is ['Tesla'] and the article mentions 'TSLA' or 'Cybertruck', return ['Tesla']. Empty list if the brand of interest is not mentioned in any form.
