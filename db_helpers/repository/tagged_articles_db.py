@@ -64,6 +64,7 @@ def _apply_article(
     row.content = _str_or_none(article.get("content"))
     row.url = _str_or_none(article.get("url"))
     row.date = _str_or_none(article.get("date")) or None
+    row.is_relevant = article.get("is_relevant") is not False
     row.is_approved_for_dashboards = bool(article.get("is_approved_for_dashboards") or False)
     row.is_approved_for_monitoring = bool(article.get("is_approved_for_monitoring") or False)
     # title/content live in their columns only; everything else stays in the JSON.

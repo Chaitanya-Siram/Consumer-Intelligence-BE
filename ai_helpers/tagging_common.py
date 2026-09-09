@@ -64,11 +64,6 @@ def build_tag_tool_parameters(brand_keywords: list[str], sections_prompt: str | 
                         "sentiment_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence (0-1) in the sentiment classification."},
                         "theme_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence (0-1) in the theme classification."},
                         "section_category_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence (0-1) in the section category assignment."},
-                        "relevancy_confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": f"Relevancy score (0-1) — how relevant the article is to {brand_name}, its competitors, or their industry."},
-                        "relevancy_reason": {
-                            "type": "string",
-                            "description": f"1-2 short sentences explaining the relevancy score — what makes the article relevant (or not) to {brand_name}, its competitors, or their industry.",
-                        },
                         "xai_theme_reason": {
                             "type": "string",
                             "description": "Concise explainable AI rationale for theme classification."
@@ -116,7 +111,6 @@ def build_tag_tool_parameters(brand_keywords: list[str], sections_prompt: str | 
                     "required": [
                         "id", "sentiment", "theme", "summary",
                         "sentiment_confidence", "theme_confidence", "section_category_confidence",
-                        "relevancy_confidence", "relevancy_reason",
                         "xai_theme_reason", "xai_sentiment_reason",
                         "brand_of_interest", "competitors", "other_competitors", "priority_watch", "section",
                         "peoples", "countries", "organizations"
@@ -182,11 +176,13 @@ class FieldConfigs:
     list_fields: list[str] = field(default_factory=list)
 
 
+# relevancy_confidence / relevancy_reason are deliberately absent: the relevancy
+# gate owns them now, and listing them here would make the tagger blank the
+# gate's values for every article it tags.
 FIELDS_CONFIG = FieldConfigs(
     fields=[
         "id", "sentiment", "theme", "summary",
         "sentiment_confidence", "theme_confidence", "section_category_confidence",
-        "relevancy_confidence", "relevancy_reason",
         "xai_theme_reason", "xai_sentiment_reason", "priority_watch", "section",
     ],
     list_fields=["brand_of_interest", "competitors", "other_competitors", "peoples", "countries", "organizations"],
@@ -201,6 +197,33 @@ def blank_tagging(article_id: str) -> dict[str, Any]:
         if f == "id":
             continue
         out[f] = [] if f in list_fields else None
+    return out
+
+
+def build_irrelevant_entries(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape irrelevant (untagged) articles like tagged ones so they can be stored.
+
+    Each entry keeps the article's own fields (minus the bulky `article_text`) plus
+    blank tag fields, giving it the SAME shape as a tagged article — the review
+    table and dashboards can then treat them uniformly. `is_relevant` is forced to
+    False; the reason and score carry through from the relevancy agent.
+
+    Args:
+        articles: The irrelevant articles from the relevancy gate.
+
+    Returns:
+        Tagged-article-shaped dicts with blank tags.
+    """
+    out: list[dict[str, Any]] = []
+    for a in articles:
+        if not isinstance(a, dict):
+            continue
+        meta = {k: v for k, v in a.items() if k != "article_text"}
+        entry = {**blank_tagging(a.get("id")), **meta}
+        entry["is_relevant"] = False
+        entry["relevancy_reason"] = a.get("relevancy_reason") or ""
+        entry["relevancy_confidence"] = a.get("relevancy_confidence")
+        out.append(entry)
     return out
 
 
@@ -474,7 +497,7 @@ def merge_tagged_with_articles(articles: list[dict[str, Any]], tagged: list[dict
         if aid in tagged_dict:
             out.append({**article_meta, **tagged_dict[aid]})
         else:
+            # Relevancy fields are not reset here — the gate already set them.
             out.append({**article_meta, "summary": None, "sentiment": None, "theme": None, "reason": None,
-                        "sentiment_confidence": None, "theme_confidence": None, "section_category_confidence": None,
-                        "relevancy_confidence": None, "relevancy_reason": None})
+                        "sentiment_confidence": None, "theme_confidence": None, "section_category_confidence": None})
     return out

@@ -70,6 +70,31 @@ def update_session_status(db: Session, session: SessionModel, status: str) -> Se
     return session
 
 
+def set_relevancy_prompt(
+    db: Session,
+    session: SessionModel,
+    relevancy_prompt: str | None,
+    relevancy_domains: dict[str, list[str]] | None = None,
+) -> SessionModel:
+    """Set (or clear) the criteria the relevancy gate applies before tagging.
+
+    Args:
+        db: Open session.
+        session: The session row to update.
+        relevancy_prompt: The criteria text, or None to clear it.
+        relevancy_domains: ``{"include": [...], "exclude": [...]}`` extracted from
+            the prompt; written alongside it so the two never disagree.
+
+    Returns:
+        The refreshed session.
+    """
+    session.relevancy_prompt = relevancy_prompt
+    session.relevancy_domains = relevancy_domains
+    db.commit()
+    db.refresh(session)
+    return session
+
+
 def update_session_workflow(db: Session, session: SessionModel, workflow: Any | None) -> SessionModel:
     """Persist the visual pipeline graph (nodes + edges) for a session."""
     session.workflow = workflow
