@@ -60,6 +60,9 @@ class Configs:
     AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
     AZURE_OPENAI_MODEL = os.getenv("AZURE_OPENAI_MODEL", "")
+    # Web search runs on the Responses API, whose deployment may differ from the
+    # chat-completions one. Falls back to AZURE_OPENAI_MODEL.
+    AZURE_OPENAI_WEB_SEARCH_MODEL = os.getenv("AZURE_OPENAI_WEB_SEARCH_MODEL", os.getenv("AZURE_OPENAI_MODEL", ""))
 
     # AWS S3 configuration
     AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")

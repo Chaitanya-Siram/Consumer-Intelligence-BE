@@ -19,6 +19,7 @@ _AZURE_ALIASES = {"azure_openai", "azure-openai", "azure", "openai", "gpt", "gpt
 
 _anthropic_client = None
 _azure_client = None
+_azure_responses_client = None
 
 
 def _get_anthropic():
@@ -30,6 +31,49 @@ def _get_anthropic():
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
         _anthropic_client = Anthropic(api_key=envs.ANTHROPIC_API_KEY)
     return _anthropic_client
+
+
+def _get_azure_responses():
+    """OpenAI client bound to the Azure v1 endpoint, which serves the Responses API.
+
+    Azure exposes web search only through Responses, and that endpoint takes the plain
+    OpenAI client against `<resource>/openai/v1/` — not AzureOpenAI with an api-version.
+
+    Returns:
+        An OpenAI client pointed at the Azure v1 endpoint.
+    """
+    global _azure_responses_client
+    if _azure_responses_client is None:
+        from openai import OpenAI
+
+        if not envs.AZURE_OPENAI_ENDPOINT or not envs.AZURE_OPENAI_API_KEY:
+            raise RuntimeError("Azure OpenAI is not configured for web search.")
+        base_url = envs.AZURE_OPENAI_ENDPOINT.rstrip("/") + "/openai/v1/"
+        _azure_responses_client = OpenAI(
+            base_url=base_url, api_key=envs.AZURE_OPENAI_API_KEY, timeout=600.0
+        )
+    return _azure_responses_client
+
+
+def _azure_web_search(system: str, user: str) -> str:
+    """Grounded completion via the Azure Responses API's `web_search` tool.
+
+    Args:
+        system: System instructions.
+        user: User message.
+
+    Returns:
+        The model's grounded text.
+    """
+    resp = _get_azure_responses().responses.create(
+        model=envs.AZURE_OPENAI_WEB_SEARCH_MODEL,
+        tools=[{"type": "web_search"}],
+        input=f"{system}\n\n{user}",
+    )
+    # Absent a web_search_call the model answered from memory; useful to know in the logs.
+    if not any(getattr(item, "type", "") == "web_search_call" for item in resp.output):
+        logger.info("Azure web search: no web_search_call in response (answered from memory)")
+    return (resp.output_text or "").strip()
 
 
 def _get_azure():
@@ -91,19 +135,52 @@ def complete(system: str, user: str, max_tokens: int = 4096, temperature: float 
 
 
 def complete_web(system: str, user: str, max_tokens: int = 4096, max_uses: int = 5) -> str:
-    """Plain-text completion with Claude's server-side `web_search` tool enabled, so
-    the model can ground its answer in live web results.
+    """Plain-text completion grounded in live web results.
 
-    Web search is a Claude-specific capability, so this prefers Claude whenever an
-    Anthropic key is available — even when LLM_PROVIDER is Azure. With no Anthropic
-    key it degrades gracefully to a normal, knowledge-only completion.
+    Prefers Claude's server-side `web_search` tool when an Anthropic key is set (even
+    when LLM_PROVIDER is Azure), then Azure's Responses API `web_search` tool. With
+    neither available — or if the grounded call fails, e.g. an admin has blocked the
+    tool — it degrades to a normal knowledge-only completion rather than raising.
+
+    Args:
+        system: System instructions.
+        user: User message.
+        max_tokens: Output cap for the Claude path.
+        max_uses: Max Claude web searches per request.
+
+    Returns:
+        The model's answer, grounded when web search was available.
     """
-    if not envs.ANTHROPIC_API_KEY:
-        logger.info("complete_web: no ANTHROPIC_API_KEY — falling back to knowledge-only completion")
-        return complete(system, user, max_tokens=max_tokens, temperature=0.0)
+    if envs.ANTHROPIC_API_KEY:
+        try:
+            return _claude_web_search(system, user, max_tokens, max_uses)
+        except Exception as exc:  # noqa: BLE001
+            # A present-but-unusable key (expired, no credit) must not block the fallback.
+            logger.warning(f"Claude web search unavailable ({exc}); trying next option")
 
-    client = _get_anthropic()
-    resp = client.messages.create(
+    if envs.AZURE_OPENAI_ENDPOINT and envs.AZURE_OPENAI_API_KEY:
+        try:
+            return _azure_web_search(system, user)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Azure web search unavailable ({exc}); using knowledge-only")
+
+    logger.info("complete_web: no web search available — knowledge-only completion")
+    return complete(system, user, max_tokens=max_tokens, temperature=0.0)
+
+
+def _claude_web_search(system: str, user: str, max_tokens: int, max_uses: int) -> str:
+    """Grounded completion via Claude's server-side `web_search` tool.
+
+    Args:
+        system: System instructions.
+        user: User message.
+        max_tokens: Output cap.
+        max_uses: Max searches per request.
+
+    Returns:
+        The model's grounded text.
+    """
+    resp = _get_anthropic().messages.create(
         model=envs.CLAUDE_MODEL,
         max_tokens=max_tokens,
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
@@ -115,16 +192,37 @@ def complete_web(system: str, user: str, max_tokens: int = 4096, max_uses: int =
     return "".join(parts).strip()
 
 
+def _drop_trailing_commas(text: str) -> str:
+    """Remove commas before a closing brace/bracket — GPT-4.1 emits them intermittently."""
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
 def _parse_json(raw: str, where: str) -> Any:
+    """Parse a model response as JSON, salvaging fences, surrounding prose and
+    trailing commas.
+
+    Args:
+        raw: The model's raw text.
+        where: Caller name, for the log line.
+
+    Returns:
+        The parsed JSON value.
+    """
     cleaned = _strip_code_fences(raw)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(1))
-        logger.warning(f"{where} could not parse model output: {cleaned[:200]}")
-        raise
+    candidates = [cleaned]
+    match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+    if match:
+        candidates.append(match.group(1))
+    for candidate in list(candidates):
+        candidates.append(_drop_trailing_commas(candidate))
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    logger.warning(f"{where} could not parse model output: {cleaned[:200]}")
+    raise json.JSONDecodeError("Could not parse model output as JSON", cleaned, 0)
 
 
 def complete_json_web(system: str, user: str, max_tokens: int = 4096, max_uses: int = 5) -> Any:
@@ -142,15 +240,7 @@ def _strip_code_fences(text: str) -> str:
 
 
 def complete_json(system: str, user: str, max_tokens: int = 4096) -> Any:
-    """Completion whose response is parsed as JSON. Tolerates markdown fences and
-    leading/trailing prose by salvaging the first JSON object/array."""
+    """Completion whose response is parsed as JSON. Tolerates markdown fences,
+    leading/trailing prose and trailing commas."""
     raw = complete(system, user, max_tokens=max_tokens, temperature=0.0)
-    cleaned = _strip_code_fences(raw)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
-        if match:
-            return json.loads(match.group(1))
-        logger.warning(f"complete_json could not parse model output: {cleaned[:200]}")
-        raise
+    return _parse_json(raw, "complete_json")
