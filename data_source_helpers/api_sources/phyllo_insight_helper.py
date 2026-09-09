@@ -7,6 +7,7 @@ from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
 )
 from data_source_helpers.scrapper_utils import (
+    extract_mentions_hashtags,
     find_matched_keywords,
     matches_boolean_query,
     split_boolean_query,
@@ -260,6 +261,29 @@ class PhylloInsightAPIHelper:
             "media_urls": item.get("media_urls"),
         }
 
+    def _tag_payloads(self, query: str, tag_params: tuple[str, ...]) -> list[dict]:
+        """Build the mention/hashtag search payloads for one query.
+
+        The API takes only one of keyword/mention/hashtag per call, so each tag
+        becomes its own search.
+
+        Args:
+            query: Boolean query string.
+            tag_params: Tag params the platform supports, e.g. ("hashtag",).
+
+        Returns:
+            List of partial payload dicts.
+        """
+        if not tag_params:
+            return []
+        tags = extract_mentions_hashtags(query)
+        payloads = []
+        if "mention" in tag_params:
+            payloads += [{"mention": m} for m in tags["mentions"]]
+        if "hashtag" in tag_params:
+            payloads += [{"hashtag": h} for h in tags["hashtags"]]
+        return payloads
+
     def _fetch_boolean_platform(
         self,
         username: str,
@@ -270,6 +294,7 @@ class PhylloInsightAPIHelper:
         platform: str,
         on_progress=None,
         sort_by: str | None = None,
+        tag_params: tuple[str, ...] = (),
         recency_hours: int = envs.DEFAULT_RSS_RECENCY_HOURS,
     ):
         """Fetch one query per search for a platform whose search accepts booleans.
@@ -283,6 +308,7 @@ class PhylloInsightAPIHelper:
             platform: Platform name, for logging.
             on_progress: Called with the running article count.
             sort_by: Result ordering; only some platforms support it.
+            tag_params: Tag params the platform supports, e.g. ("hashtag",).
             recency_hours: How far back the results should reach.
 
         Returns:
@@ -297,8 +323,13 @@ class PhylloInsightAPIHelper:
         seen_urls = set()
         try:
             query_meta = self.clean_queries(queries)
-            if query_meta:
-                max_workers = min(10, len(query_meta))
+            searches = [
+                (payload, q)
+                for q in query_meta
+                for payload in [{"keyword": q}] + self._tag_payloads(q, tag_params)
+            ]
+            if searches:
+                max_workers = min(10, len(searches))
                 pool = ThreadPoolExecutor(max_workers=max_workers)
                 try:
                     futures = {
@@ -306,11 +337,11 @@ class PhylloInsightAPIHelper:
                             self.run_search,
                             username,
                             password,
-                            {**params, "keyword": q},
+                            {**params, **payload},
                             total_records,
                             recency_hours,
                         ): q
-                        for q in query_meta
+                        for payload, q in searches
                     }
                     done = 0
                     try:
@@ -348,7 +379,7 @@ class PhylloInsightAPIHelper:
                     except FuturesTimeoutError:
                         logger.warning(
                             f"Phyllo {platform}: query fan-out hit its {_QUERY_TIMEOUT}s "
-                            f"deadline; continuing with {done} of {len(query_meta)} query/queries"
+                            f"deadline; continuing with {done} of {len(searches)} search(es)"
                         )
                 finally:
                     pool.shutdown(wait=False, cancel_futures=True)
@@ -387,6 +418,7 @@ class PhylloInsightAPIHelper:
             "x.com",
             "twitter",
             on_progress=on_progress,
+            tag_params=("mention", "hashtag"),
             recency_hours=recency_hours,
         )
 
@@ -455,6 +487,8 @@ class PhylloInsightAPIHelper:
             "youtube.com",
             "youtube",
             on_progress=on_progress,
+            # YouTube search takes a hashtag but not a mention.
+            tag_params=("hashtag",),
             recency_hours=recency_hours,
         )
 
@@ -500,7 +534,10 @@ class PhylloInsightAPIHelper:
                 groups = split_boolean_query(query)
                 terms = groups["or"] or groups["and"]
                 for term in terms:
-                    searches.append((term, query, groups))
+                    searches.append(({"keyword": term}, term, query, groups))
+                for payload in self._tag_payloads(query, ("mention", "hashtag")):
+                    term = next(iter(payload.values()))
+                    searches.append((payload, term, query, groups))
 
             if searches:
                 max_workers = min(10, len(searches))
@@ -511,11 +548,11 @@ class PhylloInsightAPIHelper:
                             self.run_search,
                             username,
                             password,
-                            {**params, "keyword": term},
+                            {**params, **payload},
                             total_records,
                             recency_hours,
                         ): (term, query, groups)
-                        for term, query, groups in searches
+                        for payload, term, query, groups in searches
                     }
                     done = 0
                     try:
