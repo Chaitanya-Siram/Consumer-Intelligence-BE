@@ -8,6 +8,7 @@ from .auth_api import router as auth_router
 from .user_api import router as user_router
 from .organization_api import router as organization_router
 from .data_provider_keys_api import router as data_provider_keys_router
+from .workflow_agent_api import router as workflow_agent_router
 
 __all__ = [
     "upload_router",
@@ -20,4 +21,5 @@ __all__ = [
     "user_router",
     "organization_router",
     "data_provider_keys_router",
+    "workflow_agent_router",
 ]

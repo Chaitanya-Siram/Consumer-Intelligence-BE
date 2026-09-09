@@ -98,6 +98,30 @@ def split_boolean_query(query: str) -> dict[str, list[str]]:
     return groups
 
 
+def extract_mentions_hashtags(query: str) -> dict[str, list[str]]:
+    """Pull the @mention and #hashtag terms out of a boolean query.
+
+    Args:
+        query: Boolean query string.
+
+    Returns:
+        Dict with "mentions" and "hashtags" term lists, without their prefix.
+    """
+    found: dict[str, list[str]] = {"mentions": [], "hashtags": []}
+    seen: dict[str, set[str]] = {"mentions": set(), "hashtags": set()}
+    for term in parse_boolean_query(query or ""):
+        bucket = "mentions" if term.startswith("@") else "hashtags" if term.startswith("#") else None
+        if not bucket:
+            continue
+        value = term[1:].strip()
+        key = value.lower()
+        if not value or key in seen[bucket]:
+            continue
+        seen[bucket].add(key)
+        found[bucket].append(value)
+    return found
+
+
 def contains_term(term: str, haystack: str) -> bool:
     """Whether a term appears in the text as a whole word.
 
