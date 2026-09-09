@@ -223,7 +223,7 @@ def get_org_active_data_providers(db: Session, org_id: int) -> dict[str, str | N
         Dict of provider name to label.
     """
     records = (
-        db.query(DataProvidersAPIModel.name, DataProvidersAPIModel.label)
+        db.query(DataProvidersAPIModel.category_label, DataProvidersAPIModel.category_value)
         .join(
             DataProvidersAPIKeyModel,
             DataProvidersAPIKeyModel.data_provider_id == DataProvidersAPIModel.id,
@@ -236,7 +236,7 @@ def get_org_active_data_providers(db: Session, org_id: int) -> dict[str, str | N
         .all()
     )
     default_data = {"Google News": "google_news"}
-    active = {name: label.lower() for name, label in records}
+    active = {category_label: category_value.lower() for category_label, category_value in records}
     return {**default_data, **active}
 
 
