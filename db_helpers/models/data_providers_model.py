@@ -23,6 +23,8 @@ class DataProvidersAPIModel(Base):
     label = Column(String, nullable=False)
     url = Column(String, nullable=False)
     credentials_fields_required = Column(JSON, nullable=False)
+    category_label = Column(String, nullable=False)
+    category_value = Column(String, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
 
 

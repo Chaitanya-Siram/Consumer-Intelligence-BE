@@ -3,20 +3,6 @@ from sqlalchemy.orm import Session
 
 from db_helpers.repository.data_provider_keys_db import get_org_active_data_providers
 
-# Labels fetching_service_v2 dispatches on. A provider outside this set is silently
-# ignored at fetch time, so the agent must never offer one.
-ACTIVE_LABELS = {
-    "google_news",
-    "tavily",
-    "serp_google_search",
-    "serp_google_news",
-    "phyllo_twitter",
-    "phyllo_instagram",
-    "phyllo_reddit",
-    "phyllo_youtube",
-}
-
-
 def get_active_providers(db: Session, org_id: int) -> dict[str, str]:
     """The org's active data providers, limited to labels the fetcher honors.
 
@@ -31,7 +17,6 @@ def get_active_providers(db: Session, org_id: int) -> dict[str, str]:
     return {
         name: label
         for name, label in providers.items()
-        if isinstance(label, str) and label.lower() in ACTIVE_LABELS
     }
 
 
