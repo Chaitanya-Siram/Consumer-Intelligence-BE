@@ -91,13 +91,13 @@ def new_file_upload_id() -> str:
 
 
 def add_upload_raw_articles(
-    db: Session, project_id: int, file_upload_id: str, records: list[dict[str, Any]]
+    db: Session, project_id: int | None, file_upload_id: str, records: list[dict[str, Any]]
 ) -> list[RawArticleModel]:
     """Store an upload's parsed records as raw articles under `file_upload_id`.
 
     Args:
         db: Database session.
-        project_id: Project this upload belongs to.
+        project_id: Project this upload belongs to, or None when it doesn't exist yet.
         file_upload_id: Id identifying this upload.
         records: Parsed article records.
 
@@ -121,7 +121,7 @@ def file_upload_exists(db: Session, file_upload_id: str) -> bool:
 
 
 def assign_uploads_to_session(
-    db: Session, session_id: int, file_upload_ids: list[str]
+    db: Session, session_id: int, file_upload_ids: list[str], project_id: int | None = None
 ) -> int:
     """Attach the rows stored under these upload ids to a session.
 
@@ -129,19 +129,24 @@ def assign_uploads_to_session(
         db: Database session.
         session_id: Session that now owns the uploaded articles.
         file_upload_ids: Upload ids from the workflow's file data nodes.
+        project_id: Backfilled onto rows uploaded before the project existed, so
+            they are covered by the project's delete cascade.
 
     Returns:
         The number of rows updated.
     """
     if not file_upload_ids:
         return 0
+    values: dict[Any, Any] = {RawArticleModel.session_id: session_id}
+    if project_id is not None:
+        values[RawArticleModel.project_id] = project_id
     updated = (
         db.query(RawArticleModel)
         .filter(
             RawArticleModel.file_upload_id.in_(file_upload_ids),
             RawArticleModel.session_id.is_(None),
         )
-        .update({RawArticleModel.session_id: session_id}, synchronize_session=False)
+        .update(values, synchronize_session=False)
     )
     db.commit()
     return updated

@@ -42,12 +42,19 @@ def _events_for(state: WorkflowAgentState, result: dict[str, Any],
     action = result["action"]
     message = result["message"]
 
-    if action == "build" and not state.confirmed_queries:
+    # A file workflow analyses an upload, so there is no query to confirm.
+    needs_query = state.source_type != "file"
+
+    if action == "build" and needs_query and not state.confirmed_queries:
         # The model tried to skip confirmation. Fall back to proposing.
         logger.info("Workflow agent: build before confirmation — downgrading to propose_query")
         action = "propose_query"
         if not result["queries"]:
             result["queries"] = state.queries
+
+    if action == "propose_query" and not needs_query:
+        # Nothing to search — the file is the data. Build it instead.
+        action = "build"
 
     if action == "propose_query":
         queries = result["queries"] or state.queries

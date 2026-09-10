@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 from pydantic import BaseModel
 from configs import logger
@@ -21,14 +23,18 @@ class UploadResponse(BaseModel):
 
 @router.post("/upload", response_model=UploadResponse)
 def upload(
-    project_id: int = Form(..., description="ID of the project this upload belongs to."),
+    project_id: Optional[int] = Form(
+        None,
+        description="Project this upload belongs to. Omit when the project does not "
+        "exist yet; the rows are claimed when the session is created.",
+    ),
     file: UploadFile = File(..., description="CSV, Excel (.xlsx/.xls), or JSON file."),
     db: Session = Depends(get_db),
     org_id: int = Depends(get_org_id),
 ) -> UploadResponse:
     logger.info(f"Upload received for filename='{file.filename}' project_id={project_id}")
 
-    if get_project(db, project_id, org_id) is None:
+    if project_id is not None and get_project(db, project_id, org_id) is None:
         raise HTTPException(status_code=404, detail="Project not found.")
 
     file_content = file.file.read()

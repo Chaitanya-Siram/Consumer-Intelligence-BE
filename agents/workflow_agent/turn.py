@@ -238,6 +238,9 @@ def _known_state(state: WorkflowAgentState, providers: dict[str, str]) -> str:
         {
             "brand": state.brand,
             "competitors": state.competitors,
+            "source_type": state.source_type,
+            "file_name": state.file_name,
+            "file_uploaded": bool(state.file_upload_id),
             "providers": [provider_name(p, providers) for p in state.providers],
             "title": state.title,
             "message_themes": state.message_themes,

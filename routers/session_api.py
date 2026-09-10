@@ -86,7 +86,9 @@ def create(
     )
 
     # The uploaded articles have no session until now; claim them for this one.
-    claimed = assign_uploads_to_session(db, session.id, file_upload_ids)
+    claimed = assign_uploads_to_session(
+        db, session.id, file_upload_ids, payload.project_id
+    )
     logger.info(
         f"Created session id={session.id} for project_id={payload.project_id}; "
         f"claimed {claimed} uploaded article(s)"
@@ -137,7 +139,9 @@ def update_workflow(
 
     session = update_session_workflow(db, session, workflow)
     # An edited workflow may point at an upload that hasn't been claimed yet.
-    claimed = assign_uploads_to_session(db, session_id, file_upload_ids)
+    claimed = assign_uploads_to_session(
+        db, session_id, file_upload_ids, session.project_id
+    )
     logger.info(f"Saved workflow for session id={session_id}; claimed {claimed} uploaded article(s)")
     return session
 

@@ -10,6 +10,11 @@ class WorkflowAgentState(BaseModel):
     brand: str = ""
     competitors: list[str] = Field(default_factory=list)
     providers: list[str] = Field(default_factory=list)
+    # "api" fetches from the providers below; "file" analyses an uploaded file,
+    # in which case no query is needed.
+    source_type: str = "api"
+    file_name: str = ""
+    file_upload_id: str = ""
     title: str = ""
     message_themes: list[str] = Field(default_factory=list)
     lenses: list[str] = Field(default_factory=list)
