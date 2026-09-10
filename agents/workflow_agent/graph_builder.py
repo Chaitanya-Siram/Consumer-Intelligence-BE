@@ -102,15 +102,22 @@ def build_graph(state: WorkflowAgentState, providers: dict[str, str]) -> dict[st
         nodes_by_type[node_type].append(node)
         return node
 
-    _add("data", {
+    data_node = {
         "label": "Data",
-        "sourceType": "api",
+        "sourceType": state.source_type,
         "brandKeywords": [brand] if brand else [],
         "messageKeywords": themes,
         "competitorKeywords": competitors,
-        "data_sources": data_sources,
-        "queries": queries,
-    })
+    }
+    if state.source_type == "file":
+        # The file is uploaded during the chat, so the node carries the real id
+        # the tagging pipeline reads; `file` is just the name shown on the canvas.
+        data_node["file_upload_id"] = state.file_upload_id
+        data_node["file"] = state.file_name
+    else:
+        data_node["data_sources"] = data_sources
+        data_node["queries"] = queries
+    _add("data", data_node)
     for lens in lenses:
         # collect_keywords also reads competitorKeywords off analysis nodes.
         _add("analysis", {"label": "Analysis", "lens": lens, "llm": llm, "skill": "",
@@ -154,10 +161,15 @@ def summarize(graph: dict[str, Any], providers: dict[str, str] | None = None) ->
     lenses = [n["data"]["lens"] for n in graph["nodes"] if n["type"] == "analysis"]
     data_node = next(n for n in graph["nodes"] if n["type"] == "data")
 
-    label_to_name = {v: k for k, v in (providers or {}).items()}
-    sources = [label_to_name.get(s, s) for s in data_node["data"]["data_sources"]]
+    if data_node["data"].get("sourceType") == "file":
+        source = data_node["data"].get("file") or "uploaded file"
+    else:
+        label_to_name = {v: k for k, v in (providers or {}).items()}
+        source = ", ".join(
+            label_to_name.get(s, s) for s in data_node["data"].get("data_sources", [])
+        )
     return (
-        f"Built a workflow: Data ({', '.join(sources)}) -> "
+        f"Built a workflow: Data ({source}) -> "
         f"{counts.get('analysis', 0)} Analysis node(s) ({', '.join(lenses)}) -> "
         f"Review -> Assembly -> Output."
     )

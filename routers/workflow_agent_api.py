@@ -7,7 +7,10 @@ Client flow:
   1. Connect to  ws://<host>/ws/workflow-agent?token=<jwt>
   2. Receive "ready" (the org's data providers) and the agent's opening turn.
   3. Send {"type": "message", "text": "..."} each turn.
-     Also accepted: {"type": "reset"} to start over, {"type": "close"} to finish.
+     Also accepted: {"type": "reset"} to start over, {"type": "close"} to finish,
+     and {"type": "attach_file", "name": "x.csv", "file_upload_id": "..."} to
+     switch the pipeline to analysing an upload (send it with no id to switch
+     back to fetching). Upload via POST /upload first to get the id.
   4. Receive typed frames until the socket closes.
 
 Server frame types:
@@ -78,6 +81,21 @@ async def workflow_agent_stream(
                 state = WorkflowAgentState()
                 turns = 0
                 await _emit(websocket, state, begin_session(state), providers)
+                continue
+            if frame_type == "attach_file":
+                # The client uploads first and sends the resulting id, so the graph
+                # can carry a real file_upload_id the tagging pipeline can read.
+                name = frame.get("name") if isinstance(frame, dict) else None
+                upload_id = frame.get("file_upload_id") if isinstance(frame, dict) else None
+                if isinstance(upload_id, str) and upload_id.strip():
+                    state.source_type = "file"
+                    state.file_upload_id = upload_id.strip()
+                    state.file_name = name.strip() if isinstance(name, str) else ""
+                else:
+                    state.source_type = "api"
+                    state.file_upload_id = ""
+                    state.file_name = ""
+                await _emit(websocket, state, [], providers)
                 continue
 
             text = frame.get("text") if isinstance(frame, dict) else None
