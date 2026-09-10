@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import threading
 import time
 import requests
 from concurrent.futures import (
@@ -17,6 +18,28 @@ from configs import logger, envs
 _QUERY_TIMEOUT = 1200
 _JOB_STATUS_POLL_INTERVAL = 5
 _JOB_STATUS_TIMEOUT = 600
+# Phyllo allows 2 calls per second across all three endpoints combined.
+_RATE_LIMIT_CALLS = 2
+_RATE_LIMIT_WINDOW = 1.0
+
+
+class _RateLimiter:
+    """Allow at most `calls` requests per `window` seconds, across all threads."""
+
+    def __init__(self, calls: int, window: float):
+        self._window = window
+        self._semaphore = threading.Semaphore(calls)
+
+    def acquire(self):
+        """Block until a call slot is free, releasing it a window later."""
+        self._semaphore.acquire()
+        # Release on a timer, not when the call returns, so the permit caps the
+        # rate rather than the number of in-flight calls.
+        threading.Timer(self._window, self._semaphore.release).start()
+
+
+_rate_limiter = _RateLimiter(_RATE_LIMIT_CALLS, _RATE_LIMIT_WINDOW)
+
 
 class PhylloInsightAPIHelper:
     def __init__(self):
@@ -27,6 +50,22 @@ class PhylloInsightAPIHelper:
         self.INSTAGRAM_ID = "9bb8913b-ddd9-430b-a66a-d74d846e6c66"
         self.REDDIT_ID = "dfe5c762-10b2-44fd-b3f2-2c6387690da8"
         self.YOUTUBE_ID = "14d9ddf5-51c6-415e-bde6-f8ed36ad7054"
+
+    def _request(self, method: str, url: str, **kwargs):
+        """Send a rate-limited request to the Phyllo API.
+
+        Args:
+            method: HTTP method.
+            url: Request URL.
+            **kwargs: Passed through to requests.request.
+
+        Returns:
+            The response, raising for a non-2xx status.
+        """
+        _rate_limiter.acquire()
+        response = requests.request(method, url, timeout=60, **kwargs)
+        response.raise_for_status()
+        return response
 
     def clean_queries(self, queries: list[dict[str, str]] | list[str]) -> list[dict[str, str]]:
         """
@@ -58,13 +97,16 @@ class PhylloInsightAPIHelper:
         Returns:
             Date filter params for the create job payload.
         """
-        # Only Twitter takes an explicit range; the others take a coarse bucket.
+        # Twitter takes an explicit range, YouTube and Reddit a coarse bucket,
+        # and Instagram has no date filter at all.
         if work_platform_id == self.TWITTER_ID:
             now = datetime.now(timezone.utc)
             return {
                 "from_date": (now - timedelta(hours=recency_hours)).strftime("%Y-%m-%d"),
                 "to_date": now.strftime("%Y-%m-%d"),
             }
+        if work_platform_id == self.INSTAGRAM_ID:
+            return {}
         return {"upload_date": "this_week"}
 
     def create_job(
@@ -96,14 +138,13 @@ class PhylloInsightAPIHelper:
             **self._date_params(params.get("work_platform_id"), recency_hours),
         }
         try:
-            response = requests.post(
+            response = self._request(
+                "POST",
                 self.API_BASE_URL,
                 headers=headers,
                 json=payload,
                 auth=(username, password),
-                timeout=60,
             )
-            response.raise_for_status()
             return response.json().get("id")
         except Exception as e:
             logger.error(f"Phyllo Error: create {platform} job failed: {e}")
@@ -126,11 +167,18 @@ class PhylloInsightAPIHelper:
         deadline = time.monotonic() + _JOB_STATUS_TIMEOUT
         while time.monotonic() < deadline:
             try:
-                response = requests.get(
-                    url, headers=headers, auth=(username, password), timeout=60
+                response = self._request(
+                    "GET", url, headers=headers, auth=(username, password)
                 )
-                response.raise_for_status()
                 status = response.json().get("status")
+            except requests.HTTPError as e:
+                # Rate limited: the next poll is a retry, so keep waiting.
+                if e.response is not None and e.response.status_code == 429:
+                    logger.warning(f"Phyllo: {platform} job status rate limited for {job_id}")
+                    time.sleep(_JOB_STATUS_POLL_INTERVAL)
+                    continue
+                logger.error(f"Phyllo Error: {platform} job status failed for {job_id}: {e}")
+                return None
             except Exception as e:
                 logger.error(f"Phyllo Error: {platform} job status failed for {job_id}: {e}")
                 return None
@@ -183,14 +231,13 @@ class PhylloInsightAPIHelper:
                 "to_date": end_date,
             }
             try:
-                response = requests.get(
+                response = self._request(
+                    "GET",
                     url,
                     headers=headers,
                     params=params,
                     auth=(username, password),
-                    timeout=60,
                 )
-                response.raise_for_status()
                 batch = response.json().get("data") or []
             except Exception as e:
                 logger.error(f"Phyllo Error: fetch {platform} data failed for {job_id}: {e}")
@@ -553,6 +600,7 @@ class PhylloInsightAPIHelper:
                             username,
                             password,
                             {**params, **payload},
+                            "instagram",
                             total_records,
                             recency_hours,
                         ): (term, query, groups)
