@@ -38,15 +38,11 @@ class SessionResponse(BaseModel):
     project_id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    session_type: Optional[str] = None
-    source_file: Optional[str] = None
-    tagged_file: Optional[str] = None
     charts_data_file: Optional[str] = None
     brand_keywords: list[str] = []
     competitor_keywords: list[str] = []
     message_keywords: list[str] = []
     relevancy_prompt: Optional[str] = None
     relevancy_domains: Optional[Any] = None
-    queries: Optional[Any] = None
     workflow: Optional[Any] = None
     status: str

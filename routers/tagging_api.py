@@ -312,8 +312,6 @@ def get_tagged_articles_api(session_id: int, db: Session = Depends(get_db)) -> A
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Workflow not found.")
-        # if not record.tagged_file:
-        #     raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
         return get_tagged_articles(db, session_id)
     except HTTPException:
@@ -344,8 +342,6 @@ def update_tagged_articles(
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
-        if not record.tagged_file:
-            raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
         articles = get_tagged_articles(db, session_id)
 
@@ -410,7 +406,6 @@ def update_tagged_articles(
             "updated_ids": updated_ids,
             "cascaded_ids": cascaded_ids,
             "not_found_ids": not_found_ids,
-            "tagged_file": "DB",
         }
     except HTTPException:
         raise
@@ -646,8 +641,6 @@ def add_tagged_articles(
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
-        if not record.tagged_file:
-            raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
         articles = get_tagged_articles(db, session_id)
 
@@ -706,8 +699,6 @@ def delete_tagged_article(
         record = get_session(db, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
-        if not record.tagged_file:
-            raise HTTPException(status_code=404, detail="No tagged file found for this session.")
 
         articles = get_tagged_articles(db, session_id)
 

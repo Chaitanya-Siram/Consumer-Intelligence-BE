@@ -161,15 +161,26 @@ def add_tagged_articles(
     return rows
 
 
-def get_tagged_articles(db: Session, session_id: int) -> list[dict[str, Any]]:
+def get_tagged_articles(db: Session, session_id: int, is_relevant: bool=None) -> list[dict[str, Any]]:
     """Return tagged articles for a session as list[dict] — the exact shape the
     charts calculators and the E2B sandbox consume."""
-    rows = (
-        db.query(TaggedArticleModel)
-        .filter(TaggedArticleModel.session_id == session_id)
-        .order_by(TaggedArticleModel.id)
-        .all()
-    )
+    if is_relevant is not None:
+        rows = (
+            db.query(TaggedArticleModel)
+            .filter(
+                TaggedArticleModel.session_id == session_id,
+                TaggedArticleModel.is_relevant == is_relevant
+            )
+            .order_by(TaggedArticleModel.id)
+            .all()
+        )
+    else:
+        rows = (
+            db.query(TaggedArticleModel)
+            .filter(TaggedArticleModel.session_id == session_id)
+            .order_by(TaggedArticleModel.id)
+            .all()
+        )
     return [article_dict(row) for row in rows]
 
 
