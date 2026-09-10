@@ -31,11 +31,28 @@ def get_user_by_email(db: Session, email: str) -> UserModel | None:
 
 def list_users(
     db: Session,
+    organization_id: int | None = None,
     include_inactive: bool = True,
     skip: int = 0,
     limit: int = 100,
 ) -> list[UserModel]:
+    """List users, newest first, optionally restricted to one organization.
+
+    Args:
+        db: Database session.
+        organization_id: Only return members of this org. None lists all users.
+        include_inactive: Include deactivated users.
+        skip: Rows to skip.
+        limit: Max rows to return.
+
+    Returns:
+        List of matching users.
+    """
     query = db.query(UserModel)
+    if organization_id is not None:
+        query = query.join(
+            UserOrgMappingModel, UserOrgMappingModel.user_id == UserModel.id
+        ).filter(UserOrgMappingModel.organization_id == organization_id)
     if not include_inactive:
         query = query.filter(UserModel.is_active.is_(True))
     return (

@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
-from db_helpers.repository.auth_repository.dependencies import get_current_user, require_superadmin_or_secret
+from db_helpers.repository.auth_repository.dependencies import (
+    get_current_user,
+    get_org_id,
+    require_superadmin_or_secret,
+)
 from db_helpers.repository.auth_repository.security import hash_password
 from configs import logger
 from db_helpers.database import get_db
@@ -93,10 +97,16 @@ def list_all(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    _: UserModel = Depends(get_current_user),
+    org_id: int = Depends(get_org_id),
 ) -> list[UserResponse]:
-    """List users, newest first."""
-    return list_users(db, include_inactive=include_inactive, skip=skip, limit=limit)
+    """List the members of the caller's organization (from the token), newest first."""
+    return list_users(
+        db,
+        organization_id=org_id,
+        include_inactive=include_inactive,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.get("/{user_id}", response_model=UserResponse)
