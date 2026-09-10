@@ -67,7 +67,7 @@ def charts(
         project = get_project(db, record.project_id)
         sections_orders = project.sections_orders if project else None
 
-        tagged_articles = get_tagged_articles(db, session_id)
+        tagged_articles = get_tagged_articles(db, session_id, is_relevant=True)
 
         dashboards_chart_data, data_for_insight = get_dashboards_chart_data(dashboards, tagged_articles, brand_keywords, competitor_keywords, message_keywords, sections_orders)
         
@@ -243,7 +243,7 @@ async def charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) -> 
         project = get_project(db, record.project_id)
         sections_orders = project.sections_orders if project else None
 
-        tagged_articles = get_tagged_articles(db, session_id)
+        tagged_articles = get_tagged_articles(db, session_id, is_relevant=True)
 
         await websocket.send_json(
             {"type": "start", "dashboards": dashboards, "total_articles": len(tagged_articles)}
@@ -463,15 +463,14 @@ def move_media_monitoring_article(payload: MoveArticleRequest, db: Session = Dep
     s3_file.upload_file(record.charts_data_file, json.dumps(charts_data, default=str).encode("utf-8"))
 
     # 2) Re-tag the article in the tagged_articles table so a regeneration keeps the move.
-    if record.tagged_file:
-        try:
-            tagged_articles = get_tagged_articles(db, payload.session_id)
-            if _set_article_section_in_tagged(tagged_articles, payload.article_id, payload.to_section):
-                for a in tagged_articles:
-                    if isinstance(a, dict) and str(a.get("id")) == str(payload.article_id):
-                        upsert_tagged_article(db, payload.session_id, a)
-        except Exception:  # noqa: BLE001
-            logger.exception(f"Failed to update tagged articles for session_id={payload.session_id}")
+    try:
+        tagged_articles = get_tagged_articles(db, payload.session_id, is_relevant=True)
+        if _set_article_section_in_tagged(tagged_articles, payload.article_id, payload.to_section):
+            for a in tagged_articles:
+                if isinstance(a, dict) and str(a.get("id")) == str(payload.article_id):
+                    upsert_tagged_article(db, payload.session_id, a)
+    except Exception:  # noqa: BLE001
+        logger.exception(f"Failed to update tagged articles for session_id={payload.session_id}")
 
     logger.info(
         f"Moved article {payload.article_id} from '{payload.from_section}' to "

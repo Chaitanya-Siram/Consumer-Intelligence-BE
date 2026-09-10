@@ -19,7 +19,6 @@ from db_helpers.database import Base
 class TaggedArticleModel(Base):
     """One tagged article belonging to a session.
 
-    Replaces the tagged JSON file that used to live on S3 (session.tagged_file).
     The article dict is split across `data` and the columns above it: url, date
     and the flags are promoted copies (also in `data`) so dashboards/filters can
     query them in SQL, while title/content live in their columns *only* to keep

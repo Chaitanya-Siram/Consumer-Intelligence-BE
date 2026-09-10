@@ -152,9 +152,12 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
         revoke_refresh_token(db, record)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is no longer active.")
 
+    # Resolve the org first: a rejected organization must not burn the caller's
+    # refresh token, or a failed org switch would end the session.
+    mapping = _resolve_mapping(db, user, payload.organization_id)
+
     # Rotate: revoke the used token, then issue a brand-new pair.
     revoke_refresh_token(db, record)
-    mapping = _resolve_mapping(db, user, payload.organization_id)
     logger.info(
         f"Refreshed tokens for user id={user.id} "
         f"org_id={mapping.organization_id if mapping else None}"
