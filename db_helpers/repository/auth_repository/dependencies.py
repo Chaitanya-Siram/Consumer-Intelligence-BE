@@ -176,6 +176,27 @@ def get_org_id(token: str = Depends(oauth2_scheme)) -> int:
     return org_id
 
 
+def get_mapping_id(token: str = Depends(oauth2_scheme)) -> int:
+    """Resolve the caller's user-org mapping id from the bearer token.
+
+    Args:
+        token: Bearer token supplied by the OAuth2 scheme.
+
+    Returns:
+        The mapping_id claim on the token.
+    """
+    claims = decode_access_token(token)
+    if not claims or not claims.get("sub"):
+        raise _CREDENTIALS_EXC
+    mapping_id = claims.get("mapping_id")
+    if mapping_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No organization membership is associated with this session. Please sign in again.",
+        )
+    return mapping_id
+
+
 def require_superadmin(
     current_user: UserModel = Depends(get_current_user),
 ) -> UserModel:

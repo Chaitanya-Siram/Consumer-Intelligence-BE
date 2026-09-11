@@ -6,7 +6,7 @@ from agents.relevancy_agent.relevancy_domain_extractor import extract_relevancy_
 from configs import logger
 from db_helpers.database import get_db
 from db_helpers.models.session_model import SessionResponse
-from db_helpers.repository.auth_repository.dependencies import get_org_id
+from db_helpers.repository.auth_repository.dependencies import get_mapping_id, get_org_id
 from db_helpers.repository.projects_db import get_project
 from db_helpers.repository.raw_articles_db import assign_uploads_to_session, file_upload_exists
 from db_helpers.workflow_validator import (
@@ -46,6 +46,7 @@ def create(
     payload: Annotated[CreateSessionRequest, Body(openapi_examples=CREATE_EXAMPLE)],
     db: Session = Depends(get_db),
     org_id: int = Depends(get_org_id),
+    mapping_id: int = Depends(get_mapping_id),
 ) -> CreateSessionResponse:
     """Create a session from a workflow graph.
 
@@ -77,11 +78,12 @@ def create(
     keywords = collect_keywords(workflow)
     session = create_session(
         db,
-        payload.project_id,
-        project.name,
-        keywords["brand_keywords"],
-        keywords["competitor_keywords"],
-        keywords["message_keywords"],
+        project_id=payload.project_id,
+        created_by_id=mapping_id,
+        name=project.name,
+        brand_keywords=keywords["brand_keywords"],
+        competitor_keywords=keywords["competitor_keywords"],
+        message_keywords=keywords["message_keywords"],
         workflow=workflow,
     )
 
@@ -90,8 +92,8 @@ def create(
         db, session.id, file_upload_ids, payload.project_id
     )
     logger.info(
-        f"Created session id={session.id} for project_id={payload.project_id}; "
-        f"claimed {claimed} uploaded article(s)"
+        f"Created session id={session.id} for project_id={payload.project_id} "
+        f"created_by_id={mapping_id}; claimed {claimed} uploaded article(s)"
     )
     return CreateSessionResponse(session_id=session.id)
 

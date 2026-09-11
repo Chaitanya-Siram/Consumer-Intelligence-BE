@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from agents.section_fetcher.sections_helper import extract_section_names
 from configs import logger
 from db_helpers.database import get_db
-from db_helpers.repository.auth_repository.dependencies import get_org_id
+from db_helpers.repository.auth_repository.dependencies import get_mapping_id, get_org_id
 from db_helpers.repository.projects_db import (
     create_project,
     delete_project,
@@ -84,10 +84,20 @@ def create(
     payload: ProjectCreate,
     db: Session = Depends(get_db),
     org_id: int = Depends(get_org_id),
+    mapping_id: int = Depends(get_mapping_id),
 ) -> ProjectResponse:
     """Create a new project in the caller's organization."""
-    project = create_project(db, org_id=org_id, name=payload.name, description=payload.description)
-    logger.info(f"Created project id={project.id} org_id={org_id} name={project.name!r}")
+    project = create_project(
+        db,
+        org_id=org_id,
+        created_by_id=mapping_id,
+        name=payload.name,
+        description=payload.description,
+    )
+    logger.info(
+        f"Created project id={project.id} org_id={org_id} "
+        f"created_by_id={mapping_id} name={project.name!r}"
+    )
     return project
 
 

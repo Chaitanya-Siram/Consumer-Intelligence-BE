@@ -6,9 +6,30 @@ _UPDATABLE_FIELDS = {"name", "description", "is_active"}
 
 
 def create_project(
-    db: Session, org_id: int, name: str, description: str | None = None
+    db: Session,
+    org_id: int,
+    created_by_id: int,
+    name: str,
+    description: str | None = None,
 ) -> ProjectModel:
-    project = ProjectModel(org_id=org_id, name=name, description=description)
+    """Create a project owned by the given org and creator.
+
+    Args:
+        db: Database session.
+        org_id: Organization the project belongs to.
+        created_by_id: user_org_mapping id of the creator.
+        name: Project name.
+        description: Optional description.
+
+    Returns:
+        The created project.
+    """
+    project = ProjectModel(
+        org_id=org_id,
+        created_by_id=created_by_id,
+        name=name,
+        description=description,
+    )
     db.add(project)
     db.commit()
     db.refresh(project)
