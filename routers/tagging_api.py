@@ -15,9 +15,13 @@ from ai_helpers.article_linker import link_articles
 from configs import logger
 from data_source_helpers.fetching_service_v2 import fetching_service
 from data_source_helpers.newspaper_helper import article_content_fetch
+from db_helpers.models.session_model import SessionModel
 from db_helpers.repository.auth_repository.dependencies import get_connection_org_id
 from db_helpers.repository.data_provider_keys_db import get_org_active_data_providers_key
 from db_helpers.repository.sessions_db import (
+    clear_retag_marker,
+    drop_cached_charts,
+    get_retag_marker,
     get_session,
     invalidate_session_charts,
     update_session_status,
@@ -25,10 +29,13 @@ from db_helpers.repository.sessions_db import (
 from db_helpers.repository.raw_articles_db import get_raw_articles, get_untagged_raw_articles
 from db_helpers.repository.tagged_articles_db import (
     add_tagged_articles as save_tagged_articles,
+    article_dict,
     count_tagged_articles,
     delete_tagged_article,
+    get_recent_tagged_articles,
     get_tagged_articles,
     next_article_ref_number,
+    raw_article_id_map,
     replace_tagged_articles,
     upsert_tagged_article,
 )
@@ -42,7 +49,6 @@ from db_helpers.schemas.tagging_schema import (
     TaggedArticleUpdate,
 )
 from file_helpers.cleaing_data import clean_articles, reorder_by_confidence
-from file_helpers.s3_file import s3_file
 from file_helpers.similare_web_reach import get_reach
 from db_helpers.database import get_db
 
@@ -72,6 +78,41 @@ def _reindex_for_chat(session_id: int, project_id: int | None, articles: list[di
             "stale until the next successful tagging run.",
             exc_info=True,
         )
+
+
+# How far back a brand/competitor change re-tags. Rows tagged before this window
+# keep the tags they were given under the old configuration.
+RETAG_WINDOW_HOURS = 24
+
+
+def _load_retag_articles(
+    db: Session, record: SessionModel
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, bool]]]:
+    """The already-tagged articles to re-tag under a changed brand/competitor set.
+
+    Returns the article dicts (empty when no retag is pending) and, keyed by
+    article ref, the approval flags to restore after re-tagging — the LLM has no
+    say in those and a reviewer's approval must survive the retag.
+    """
+    if get_retag_marker(record) is None:
+        return [], {}
+
+    rows = get_recent_tagged_articles(db, record.id, RETAG_WINDOW_HOURS)
+
+    articles: list[dict[str, Any]] = []
+    approvals: dict[str, dict[str, bool]] = {}
+    for row in rows:
+        article = article_dict(row)
+        # Keep the stored id: clean_articles would assign a fresh A{n}, orphaning
+        # syndication pointers and inserting duplicates instead of updating rows.
+        if not article.get("id"):
+            article["id"] = row.article_ref
+        articles.append(article)
+        approvals[row.article_ref] = {
+            "is_approved_for_dashboards": bool(row.is_approved_for_dashboards),
+            "is_approved_for_monitoring": bool(row.is_approved_for_monitoring),
+        }
+    return articles, approvals
 
 
 @router.websocket("/ws/tagging")
@@ -151,9 +192,20 @@ async def tagging_stream(
 
         update_session_status(db, record, "Tagging")
 
-        # Only tag what hasn't been tagged yet; earlier tagged rows are kept as-is.
+        # Only tag what hasn't been tagged yet; earlier tagged rows are kept as-is,
+        # unless a brand/competitor change marked recent ones for re-tagging.
         raw = get_untagged_raw_articles(db, session_id)
-        if not raw:
+        retag_articles, retag_approvals = _load_retag_articles(db, record)
+        if retag_articles:
+            logger.info(
+                f"Retagging {len(retag_articles)} article(s) tagged in the last "
+                f"{RETAG_WINDOW_HOURS}h for session_id={session_id} after a keyword change"
+            )
+            await websocket.send_json({
+                "type": "progress",
+                "message": f"Re-tagging {len(retag_articles)} recent article(s) for the updated brand…",
+            })
+        if not raw and not retag_articles:
             already_tagged = count_tagged_articles(db, session_id)
             if not already_tagged:
                 await websocket.send_json(
@@ -177,7 +229,11 @@ async def tagging_stream(
             update_session_status(db, record, "Tagged")
             return
 
+        # New raw articles continue the A{n} numbering; retag articles keep the ids
+        # they already have, so their existing rows are updated rather than duplicated.
         articles = clean_articles(raw, start_id=next_article_ref_number(db, session_id))
+        retag_ids = {a["id"] for a in retag_articles if a.get("id")}
+        articles = retag_articles + articles
 
         brand_keywords = record.brand_keywords or []
         competitor_keywords = record.competitor_keywords or []
@@ -212,7 +268,9 @@ async def tagging_stream(
         await websocket.send_json({"type": "progress", "message": "Fetching reach…"})
         articles = await asyncio.to_thread(get_reach, articles)
 
-        await websocket.send_json({"type": "start", "total_articles": len(articles)})
+        await websocket.send_json(
+            {"type": "start", "total_articles": len(articles), "retagging": len(retag_ids)}
+        )
 
         await websocket.send_json({"type": "progress", "message": "Linking related articles…"})
         articles = await asyncio.to_thread(link_articles, articles)
@@ -268,8 +326,21 @@ async def tagging_stream(
         # tagged set is complete — the review UI filters on is_relevant.
         final_articles = tagged_full + build_irrelevant_entries(irrelevant)
 
-        # Append to the session's tagged articles; previously tagged rows stay.
-        save_tagged_articles(db, session_id, final_articles)
+        # Re-tagged articles update their existing rows (matched on the A{n} ref, so
+        # refs and approvals survive); everything else is appended as before.
+        if retag_ids:
+            retagged = [a for a in final_articles if a.get("id") in retag_ids]
+            fresh = [a for a in final_articles if a.get("id") not in retag_ids]
+            raw_map = raw_article_id_map(db, session_id)
+            for article in retagged:
+                article.update(retag_approvals.get(article["id"], {}))
+                upsert_tagged_article(db, session_id, article, raw_map)
+            save_tagged_articles(db, session_id, fresh)
+            clear_retag_marker(db, record)
+            logger.info(f"Re-tagged {len(retagged)} article(s) for session_id={session_id}")
+        else:
+            # Append to the session's tagged articles; previously tagged rows stay.
+            save_tagged_articles(db, session_id, final_articles)
         # Embed for chat in the background so the client isn't blocked on it; the
         # task is fire-and-forget (it swallows its own errors and touches no request
         # state), so tagging completes immediately.
@@ -277,12 +348,18 @@ async def tagging_stream(
             asyncio.to_thread(_reindex_for_chat, session_id, record.project_id, final_articles)
         )
         
+        # Re-tagged rows changed their tags, so dashboards built from the old ones
+        # are stale. New-only runs append and leave existing charts valid.
+        if retag_ids:
+            drop_cached_charts(db, record)
+
         await websocket.send_json(
             {
                 "type": "complete",
                 "total_tagged": len(final_articles),
                 "relevant_count": len(tagged_full),
                 "irrelevant_count": len(irrelevant),
+                "retagged_count": len(retag_ids),
                 "elapsed_seconds": round(time.time() - started, 1),
             }
         )
@@ -390,12 +467,7 @@ def update_tagged_articles(
                 upsert_tagged_article(db, session_id, article)
 
         # The tags changed, so any dashboards built from the old tags are stale.
-        if record.charts_data_file:
-            try:
-                s3_file.delete_file(record.charts_data_file)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to delete stale charts file; continuing.")
-        invalidate_session_charts(db, record)
+        drop_cached_charts(db, record)
 
         logger.info(
             f"Updated {len(updated_ids)} tagged articles for session_id={session_id}"
@@ -469,12 +541,7 @@ def mark_articles_relevant(
             updated.append(merged)
 
         # Newly-relevant, tagged articles change the dashboards → drop the cache.
-        if record.charts_data_file:
-            try:
-                s3_file.delete_file(record.charts_data_file)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to delete stale charts file; continuing.")
-        invalidate_session_charts(db, record)
+        drop_cached_charts(db, record)
 
         logger.info(f"Marked {len(updated)} article(s) relevant and tagged them for session_id={session_id}")
         return updated
@@ -529,12 +596,7 @@ def mark_articles_irrelevant(
             raise HTTPException(status_code=404, detail=f"None of the provided ids exist: {ids}")
 
         # These articles leave the dashboards → drop the cached charts.
-        if record.charts_data_file:
-            try:
-                s3_file.delete_file(record.charts_data_file)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to delete stale charts file; continuing.")
-        invalidate_session_charts(db, record)
+        drop_cached_charts(db, record)
 
         logger.info(f"Moved {len(updated)} article(s) to irrelevant for session_id={session_id}")
         return updated
@@ -671,12 +733,7 @@ def add_tagged_articles(
             upsert_tagged_article(db, session_id, new_article)
 
         # Tags changed → cached dashboards are stale.
-        if record.charts_data_file:
-            try:
-                s3_file.delete_file(record.charts_data_file)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to delete stale charts file; continuing.")
-        invalidate_session_charts(db, record)
+        drop_cached_charts(db, record)
 
         logger.info(f"Added {len(created)} article(s) to session_id={session_id}")
         return created
@@ -711,12 +768,7 @@ def delete_tagged_article(
         delete_tagged_article(db, session_id, article_id)
 
         # Tags changed → cached dashboards are stale.
-        if record.charts_data_file:
-            try:
-                s3_file.delete_file(record.charts_data_file)
-            except Exception:  # noqa: BLE001
-                logger.warning("Failed to delete stale charts file; continuing.")
-        invalidate_session_charts(db, record)
+        drop_cached_charts(db, record)
 
         logger.info(f"Deleted manual article {article_id} from session_id={session_id}")
         return {"deleted_id": article_id}

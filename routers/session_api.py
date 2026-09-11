@@ -19,16 +19,23 @@ from db_helpers.workflow_validator import (
 from db_helpers.repository.sessions_db import (
     create_session,
     delete_session,
+    drop_cached_charts,
     get_session,
     list_sessions_by_project,
     set_relevancy_prompt,
     update_session_workflow,
 )
+from db_helpers.repository.tagged_articles_db import count_tagged_articles
 
 router = APIRouter(tags=["sessions"])
 
 class WorkflowUpdate(BaseModel):
     workflow: dict[str, Any]
+
+class WorkflowUpdateResponse(SessionResponse):
+    # True when the brand/competitor change means the next tagging run will re-tag
+    # the last 24 hours of already-tagged articles.
+    retag_pending: bool = False
 
 class RelevancyPromptUpdate(BaseModel):
     relevancy_prompt: Optional[str] = None
@@ -115,13 +122,19 @@ def get_one(session_id: int, db: Session = Depends(get_db)) -> SessionResponse:
     return session
 
 
-@router.put("/sessions/{session_id}/workflow", response_model=SessionResponse)
+@router.put("/sessions/{session_id}/workflow", response_model=WorkflowUpdateResponse)
 def update_workflow(
     session_id: int,
     payload: Annotated[WorkflowUpdate, Body(openapi_examples=WORKFLOW_EXAMPLE_BODY)],
     db: Session = Depends(get_db),
-) -> SessionResponse:
-    """Persist the workflow designer graph (nodes + edges) on the session."""
+) -> WorkflowUpdateResponse:
+    """Persist the workflow designer graph (nodes + edges) on the session.
+
+    The brand/competitor/message keyword columns are re-derived from the graph, so
+    an edited brand actually reaches the tagger. When those keywords change on a
+    session that already has tagged articles, the session is marked for retag: the
+    next tagging run re-tags the last 24 hours of tagged articles under the new
+    configuration. `retag_pending` in the response says whether that is queued."""
     session = get_session(db, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -139,13 +152,25 @@ def update_workflow(
                 status_code=404, detail=f"No uploaded articles found for file_upload_id {file_upload_id}."
             )
 
-    session = update_session_workflow(db, session, workflow)
+    keywords = collect_keywords(workflow)
+    has_tagged = count_tagged_articles(db, session_id) > 0
+    session, retag_pending = update_session_workflow(
+        db, session, workflow, keywords, has_tagged_articles=has_tagged
+    )
     # An edited workflow may point at an upload that hasn't been claimed yet.
     claimed = assign_uploads_to_session(
         db, session_id, file_upload_ids, session.project_id
     )
-    logger.info(f"Saved workflow for session id={session_id}; claimed {claimed} uploaded article(s)")
-    return session
+    if retag_pending:
+        # Dashboards built from the old brand can't be served any more.
+        session = drop_cached_charts(db, session)
+    logger.info(
+        f"Saved workflow for session id={session_id}; claimed {claimed} uploaded "
+        f"article(s); retag_pending={retag_pending}"
+    )
+    response = WorkflowUpdateResponse.model_validate(session)
+    response.retag_pending = retag_pending
+    return response
 
 
 @router.post("/sessions/{session_id}/relevancy_prompt", response_model=SessionResponse)
