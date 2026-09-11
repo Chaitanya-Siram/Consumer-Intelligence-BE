@@ -93,6 +93,9 @@ def _issue_tokens(
     if mapping is not None:
         extra_claims["org_id"] = mapping.organization_id
         extra_claims["role"] = mapping.role
+        # Identifies the user *within* the org; recorded as created_by_id on
+        # the rows they create.
+        extra_claims["mapping_id"] = mapping.id
     access_token = create_access_token(subject=user.id, extra_claims=extra_claims)
     _, raw_refresh = create_refresh_token(db, user.id)
     return TokenResponse(

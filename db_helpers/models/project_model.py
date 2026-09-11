@@ -6,6 +6,7 @@ class ProjectModel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     org_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("user_org_mapping.id", ondelete="SET NULL"), nullable=True)
     name = Column(String, nullable=False)
     description = Column(String, nullable=True)
     created_at = Column(DateTime, default=func.now())

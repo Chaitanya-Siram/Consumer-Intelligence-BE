@@ -23,14 +23,31 @@ def delete_session(db: Session, session: SessionModel) -> None:
 def create_session(
     db: Session,
     project_id: int,
+    created_by_id: int,
     name: str,
     brand_keywords: list[str],
     competitor_keywords: list[str],
     message_keywords: list[str],
     workflow: Any | None = None,
 ) -> SessionModel:
+    """Create a session under a project.
+
+    Args:
+        db: Database session.
+        project_id: Project the session belongs to.
+        created_by_id: user_org_mapping id of the creator.
+        name: Session name.
+        brand_keywords: Brand keywords collected from the workflow.
+        competitor_keywords: Competitor keywords collected from the workflow.
+        message_keywords: Message keywords collected from the workflow.
+        workflow: Validated workflow graph.
+
+    Returns:
+        The created session.
+    """
     new_session = SessionModel(
         project_id=project_id,
+        created_by_id=created_by_id,
         name=name,
         brand_keywords=brand_keywords,
         competitor_keywords=competitor_keywords,
