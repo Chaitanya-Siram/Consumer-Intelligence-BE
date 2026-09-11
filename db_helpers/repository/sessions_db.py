@@ -1,5 +1,8 @@
+from datetime import datetime
 from typing import Any
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from configs import logger
 from db_helpers.models.session_model import SessionModel
 
 
@@ -80,6 +83,21 @@ def invalidate_session_charts(db: Session, session: SessionModel) -> SessionMode
     return session
 
 
+def drop_cached_charts(db: Session, session: SessionModel) -> SessionModel:
+    """Delete the session's cached charts file from S3 and clear it on the row.
+
+    The S3 delete is best-effort — a stale object left behind is harmless once the
+    row no longer points at it, and must never fail the caller's own work."""
+    if session.charts_data_file:
+        try:
+            from file_helpers.s3_file import s3_file
+
+            s3_file.delete_file(session.charts_data_file)
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to delete stale charts file; continuing.")
+    return invalidate_session_charts(db, session)
+
+
 def update_session_status(db: Session, session: SessionModel, status: str) -> SessionModel:
     session.status = status
     db.commit()
@@ -112,10 +130,61 @@ def set_relevancy_prompt(
     return session
 
 
-def update_session_workflow(db: Session, session: SessionModel, workflow: Any | None) -> SessionModel:
-    """Persist the visual pipeline graph (nodes + edges) for a session."""
+def update_session_workflow(
+    db: Session,
+    session: SessionModel,
+    workflow: Any | None,
+    keywords: dict[str, list[str]],
+    has_tagged_articles: bool = False,
+) -> tuple[SessionModel, bool]:
+    """Persist the visual pipeline graph and the keywords derived from it.
+
+    Args:
+        db: Database session.
+        session: The session row to update.
+        workflow: Validated workflow graph.
+        keywords: Output of collect_keywords(workflow).
+        has_tagged_articles: Whether the session already has tagged rows.
+
+    Returns:
+        The refreshed session, and whether a retag is now pending.
+    """
+    # Only brand/competitor keywords reach the tagging prompt and tool schema, so
+    # only they can invalidate existing tags. Compared as sets: reordering the
+    # same keywords is not a change.
+    keywords_changed = (
+        set(session.brand_keywords or []) != set(keywords["brand_keywords"])
+        or set(session.competitor_keywords or []) != set(keywords["competitor_keywords"])
+    )
+
+    session.brand_keywords = keywords["brand_keywords"]
+    session.competitor_keywords = keywords["competitor_keywords"]
+    session.message_keywords = keywords["message_keywords"]
     session.workflow = workflow
-    session.status = "Workflow Saved"
+
+    # Stamped by the database clock, so it is comparable with the equally naive
+    # tagged_articles.created_at. An unrelated save leaves a pending stamp alone.
+    if keywords_changed and has_tagged_articles:
+        session.retag_after = func.now()
+
+    # "Workflow Saved" would misreport an already-tagged session as unprocessed.
+    if not has_tagged_articles:
+        session.status = "Workflow Saved"
+
     db.commit()
     db.refresh(session)
+    return session, session.retag_after is not None
+
+
+def get_retag_marker(session: SessionModel) -> datetime | None:
+    """When this session was marked for retag, or None when none is pending."""
+    return session.retag_after
+
+
+def clear_retag_marker(db: Session, session: SessionModel) -> SessionModel:
+    """Drop the pending-retag marker once a retag run has completed."""
+    if session.retag_after is not None:
+        session.retag_after = None
+        db.commit()
+        db.refresh(session)
     return session

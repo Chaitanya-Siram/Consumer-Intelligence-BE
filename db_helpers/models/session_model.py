@@ -25,6 +25,8 @@ class SessionModel(Base):
     workflow = Column(NestedMutableDict.as_mutable(JSON), nullable=True)
     status = Column(String, nullable=False, default="Created")
     charts_data_file = Column(String, nullable=True)
+    # Keyword change validator to run re-tags the recent window and clears it.
+    retag_after = Column(DateTime, nullable=True)
     # schedule_time = Column(String, nullable=True)
     # schedule_timezone = Column(String, nullable=True)
     # schedule_time_utc = Column(String, nullable=True)
@@ -46,3 +48,4 @@ class SessionResponse(BaseModel):
     relevancy_domains: Optional[Any] = None
     workflow: Optional[Any] = None
     status: str
+    retag_after: Optional[datetime] = None

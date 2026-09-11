@@ -2,6 +2,7 @@ import math
 
 from typing import Any, Optional
 
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from db_helpers.models.raw_article_model import RawArticleModel
@@ -22,6 +23,11 @@ def _raw_article_id_map(db: Session, session_id: int) -> dict[str, str]:
         if url and article_id:
             mapping[url.strip().rstrip("/")] = article_id
     return mapping
+
+
+def raw_article_id_map(db: Session, session_id: int) -> dict[str, str]:
+    """Public alias of `_raw_article_id_map`, for callers upserting in a loop."""
+    return _raw_article_id_map(db, session_id)
 
 
 def _resolve_article_id(article: dict[str, Any], raw_map: Optional[dict[str, str]] = None) -> Optional[str]:
@@ -184,6 +190,35 @@ def get_tagged_articles(db: Session, session_id: int, is_relevant: bool=None) ->
     return [article_dict(row) for row in rows]
 
 
+def get_recent_tagged_articles(
+    db: Session, session_id: int, within_hours: int
+) -> list[TaggedArticleModel]:
+    """Return the session's tagged rows created within the last `within_hours`.
+
+    The cutoff is computed by the database rather than in Python: `created_at` is a
+    naive column filled by `func.now()`, so a Python-side bound would be off by the
+    app server's UTC offset.
+
+    Args:
+        db: Database session.
+        session_id: Session to read.
+        within_hours: Size of the look-back window in hours.
+
+    Returns:
+        The matching rows, oldest first.
+    """
+    cutoff = func.now() - text(f"interval '{int(within_hours)} hours'")
+    return (
+        db.query(TaggedArticleModel)
+        .filter(
+            TaggedArticleModel.session_id == session_id,
+            TaggedArticleModel.created_at >= cutoff,
+        )
+        .order_by(TaggedArticleModel.id)
+        .all()
+    )
+
+
 def get_tagged_article(
     db: Session, session_id: int, article_ref: str
 ) -> TaggedArticleModel | None:
@@ -198,11 +233,15 @@ def get_tagged_article(
 
 
 def upsert_tagged_article(
-    db: Session, session_id: int, article: dict[str, Any]
+    db: Session, session_id: int, article: dict[str, Any], raw_map: Optional[dict[str, str]] = None
 ) -> TaggedArticleModel:
     """Insert or update one article's row from its full dict (used by the
-    review/edit endpoints in place of rewriting the whole tagged file)."""
-    raw_map = _raw_article_id_map(db, session_id)
+    review/edit endpoints in place of rewriting the whole tagged file).
+
+    Pass `raw_map` (from `raw_article_id_map`) when upserting many articles in a
+    loop, so the url->article_id lookup is built once instead of per call."""
+    if raw_map is None:
+        raw_map = _raw_article_id_map(db, session_id)
     article_id = _resolve_article_id(article, raw_map)
     row = get_tagged_article(db, session_id, str(article.get("id") or ""))
     if row is None:
