@@ -1,0 +1,650 @@
+"""LLM prose for every CI storyboard.
+
+Follows ConsumerIntelligence_PR/backend/app/charts/storyboard/narrative.py:
+  1. `_facts_<lens>(storyboard)` condenses numbers into a compact dict
+  2. one JSON-mode chat call with a strict schema in the system prompt
+  3. `_apply_<lens>(storyboard, raw)` merges field-by-field, defensively
+
+`write_narrative()` never raises — on any failure the storyboard is returned
+with prose fields still empty so the numbers always ship.
+"""
+
+import asyncio
+import json
+import logging
+
+from ..narrative_client import get_narrative_client
+
+logger = logging.getLogger(__name__)
+
+_SYSTEM = (
+    "You are a senior consumer-intelligence analyst writing storyboard copy for a "
+    "brand dashboard built from tagged news coverage. Write crisp, specific, "
+    "executive-grade prose. Every sentence must be grounded in the FACTS JSON — "
+    "cite numbers from it, never invent figures, brands, or events. Avoid filler "
+    "and marketing cliché. Return ONLY a JSON object matching the SCHEMA exactly; "
+    "every key must be present; strings may be empty when nothing can be said."
+)
+
+
+def _s(value, limit: int = 600) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _list(value, limit: int = 6, item_chars: int = 240) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_s(v, item_chars) for v in value if _s(v)][:limit]
+
+
+async def _ask(facts: dict, schema: dict, task: str) -> dict:
+    client = get_narrative_client()
+    messages = [
+        {"role": "system", "content": _SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"TASK:\n{task}\n\nSCHEMA (return exactly these keys):\n"
+                f"{json.dumps(schema, indent=1)}\n\nFACTS:\n{json.dumps(facts, ensure_ascii=False)}"
+            ),
+        },
+    ]
+    result = await client.complete_json(messages)
+    return result if isinstance(result, dict) else {}
+
+
+# ── trend_intelligence ────────────────────────────────────────────────────
+
+
+def _facts_trend(sb: dict) -> dict:
+    """The aggregates the model is allowed to write about (mirrors reference)."""
+    mode = sb["meta"]["dataset_mode"]
+    return {
+        "meta": {k: v for k, v in sb["meta"].items() if k not in ("logos", "days")},
+        "signals": [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "stage": s["stage"],
+                "growth_pct": s["growth"],
+                "volume": s["volume"],
+                "net_sentiment": s["net_sentiment"],
+                # Omitted for a brand export: it is ~100% for every signal there and
+                # the model reads it as a competitive win rather than an artefact.
+                **({"brand_capture_pct": s["brand_capture"]} if mode == "category" else {}),
+                "leaders": s["leaders"][:3],
+            }
+            for s in sb["signals"]
+        ],
+        "share_of_voice": sb["sov"][:6],
+        "net_sentiment_league": sb["net_sentiment"][:6],
+        "capture_ranking": sb["capture_ranking"],
+        "capture_label": sb["meta"].get("capture_label", ""),
+        "kpi_cards": [
+            {"label": k["label"], "value": k["value"], "delta": k["delta"]}
+            for k in (sb["tabs"][0]["kpis"] if sb["tabs"] else [])
+        ],
+        "priorities": [
+            {"id": p["signal_id"], "name": p["name"], "score": p["score"]}
+            for p in sb["priorities"]
+        ],
+        "verdict_groups": [
+            {"title": c["title"], "signals": [i["label"] for i in c["items"]]}
+            for c in sb["verdict_columns"]
+        ],
+        "modal_keys": {
+            key: {"title": m["title"], "stats": m["stats"]}
+            for key, m in sb["modals"].items()
+        },
+        "tabs": [{"id": t["id"], "label": t["label"], "number": t["number"]} for t in sb["tabs"]],
+        "quotes": [q["text"][:160] for q in sb["quotes"][:3]],
+    }
+
+
+_TAB_SHAPE = {
+    "headline": "str <= 9 words",
+    "sub": "str one sentence",
+    "badges": ["3 very short stat labels"],
+    "context": "str 2-3 sentences on why this matters",
+    "kpi_backs": ["one explanation per KPI card, in order (tab1 only; [] otherwise)"],
+    "whats_next": {
+        "title": "str <= 10 words",
+        "sub": "str one sentence",
+        "actions": [{"title": "str <= 4 words", "body": "str one short line"}],
+    },
+}
+
+_SCHEMA_TREND = {
+    "hero": {"title": "str <= 12 words, the report's argument", "subtitle": "str one sentence", "chips": ["3 short context labels"]},
+    "tabs": {"tab1": _TAB_SHAPE, "tab2": _TAB_SHAPE, "tab3": _TAB_SHAPE},
+    "callout": "str - one sentence naming the sharpest contrast in the data",
+    "priorities": [{"name": "signal name from facts.priorities", "why": "2 sentences: why it ranks here and what to do"}],
+    "verdict": [{"column": "title from facts.verdict_groups", "label": "signal name", "text": "one clause on how to treat this signal"}],
+    "modals": {"<key from facts.modal_keys>": ["2-3 short paragraphs: what the number is, what explains it, what to do"]},
+    "footer": ["2-3 one-line methodology notes"],
+}
+
+
+def _apply_trend(sb: dict, raw: dict) -> None:
+    hero = raw.get("hero") if isinstance(raw.get("hero"), dict) else {}
+    sb["hero"]["title"] = _s(hero.get("title"), 120) or (sb["meta"]["brand"] or "Trend Intelligence")
+    sb["hero"]["subtitle"] = _s(hero.get("subtitle"), 400)
+    sb["hero"]["chips"] = _list(hero.get("chips"), 4, 60)
+
+    tabs_prose = raw.get("tabs") if isinstance(raw.get("tabs"), dict) else {}
+    for position, tab in enumerate(sb["tabs"]):
+        prose = tabs_prose.get(tab["id"])
+        if not isinstance(prose, dict):
+            prose = {}
+        tab["banner"]["headline"] = _s(prose.get("headline"), 140) or tab["label"]
+        tab["banner"]["sub"] = _s(prose.get("sub"), 400)
+        tab["banner"]["badges"] = _list(prose.get("badges"), 3, 60)
+        tab["context"]["body"] = _s(prose.get("context"), 900)
+
+        backs = _list(prose.get("kpi_backs"), len(tab["kpis"]), 400)
+        for card, back in zip(tab["kpis"], backs):
+            card["back"] = back
+
+        nxt = prose.get("whats_next") if isinstance(prose.get("whats_next"), dict) else {}
+        actions = nxt.get("actions") if isinstance(nxt.get("actions"), list) else []
+        # Ordered from the NEXT tab onward and wrapping, so the CTA reads forward.
+        others = sb["tabs"][position + 1:] + sb["tabs"][:position]
+        arrow = "\u21ba" if tab["id"] == "tab3" else "\u2192"
+        tab["whats_next"] = {
+            "eyebrow": "The Verdict" if tab["id"] == "tab3" else "What's Next",
+            "title": _s(nxt.get("title"), 120),
+            "sub": _s(nxt.get("sub"), 300),
+            "actions": [
+                {
+                    "num": f"{arrow} {target['number']}",
+                    "title": (_s(a.get("title"), 60) if isinstance(a, dict) else "") or target["label"],
+                    "body": _s(a.get("body"), 200) if isinstance(a, dict) else "",
+                    "target": target["id"],
+                }
+                for a, target in zip(actions + [{}] * len(others), others)
+            ],
+            "cta": {
+                "label": "RESTART" if tab["id"] == "tab3" else "CONTINUE",
+                "name": others[0]["label"] if others else "",
+                "target": others[0]["id"] if others else tab["id"],
+            },
+        }
+
+    sb["callout"] = _s(raw.get("callout"))
+
+    # priorities: match by name (never replace the array)
+    why_by_name: dict[str, str] = {}
+    items = raw.get("priorities")
+    if isinstance(items, dict):
+        why_by_name = {str(k): _s(v, 400) for k, v in items.items()}
+    elif isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                key = _s(item.get("name") or item.get("signal") or item.get("id"), 120)
+                if key:
+                    why_by_name[key] = _s(item.get("why") or item.get("action"), 400)
+    for priority in sb["priorities"]:
+        priority["why"] = why_by_name.get(priority["name"]) or why_by_name.get(priority["signal_id"], "")
+
+    # verdict columns: match by column title + item label (never replace the arrays)
+    verdict = raw.get("verdict") if raw.get("verdict") is not None else raw.get("verdict_columns")
+    by_label: dict[tuple[str, str], str] = {}
+    if isinstance(verdict, dict):
+        for label, text in verdict.items():
+            by_label[("", str(label))] = _s(text, 300)
+    elif isinstance(verdict, list):
+        for item in verdict:
+            if isinstance(item, dict):
+                by_label[(_s(item.get("column"), 80), _s(item.get("label"), 120))] = _s(item.get("text"), 300)
+    for column in sb["verdict_columns"]:
+        for item in column["items"]:
+            item["text"] = (
+                by_label.get((column["title"], item["label"]))
+                or by_label.get(("", item["label"]))
+                or ""
+            )
+
+    # modals: match by key
+    modals = raw.get("modals") if isinstance(raw.get("modals"), dict) else {}
+    for key, modal in sb["modals"].items():
+        paragraphs = modals.get(key)
+        if isinstance(paragraphs, str):
+            paragraphs = [paragraphs]
+        modal["paragraphs"] = _list(paragraphs, 4, 700)
+
+    sb["footer"] = _list(raw.get("footer"), 3, 200) or [
+        f"{sb['meta']['total_conversations']:,} conversations \u00b7 {sb['meta']['window_label']}",
+        "InfoVision / AlphaMetricx \u00b7 Consumer Intelligence",
+    ]
+
+
+# ── brand_competitive_intel ───────────────────────────────────────────────
+
+
+def _facts_bci(sb: dict) -> dict:
+    return {
+        "meta": {k: v for k, v in sb["meta"].items() if k not in ("logos", "days")},
+        # Without this the model wrote a brand-engagement headline onto the
+        # competitor tab, because a brand export gives it little else to say there.
+        "tab_subjects": {
+            "t1": "overall volume, sentiment split and engagement",
+            "t2": "what the brand's own conversation is about and what drives each sentiment",
+            "t3": "how the brand compares with the competitors present in this dataset",
+        },
+        "kpis": [{"label": k["label"], "value": k["value"], "sub": k["sub"]} for k in sb["kpis"]],
+        "sentiment_split": sb["sentiment_split"],
+        "platforms": sb["platforms"][:6],
+        "themes": sb["themes"][:6],
+        "entities": sb["items"][:6],
+        "positive_drivers": sb["positive_drivers"][:5],
+        "negative_drivers": sb["negative_drivers"][:5],
+        "operational_issues": sb["operational_issues"][:5],
+        "platform_engagement": sb["platform_engagement"],
+        "competitor_table": sb["competitor_ranks"][:6],
+        "avg_engagement": sb["avg_engagement"][:6],
+        # Excerpts only, so the model can name a story without quoting at length.
+        "top_post_excerpts": [
+            {"sentiment": p["sentiment"], "source": p["source"], "engagement": p["engagement"], "excerpt": p["text"][:160]}
+            for p in sb["top_posts"][:5]
+        ],
+    }
+
+
+_SCHEMA_BCI = {
+    "tabs": {
+        "t1": {"headline": "str <= 12 words, the report's argument - about tab_subjects.t1", "sub": "str 2 sentences of context"},
+        "t2": {"headline": "str <= 12 words - about tab_subjects.t2", "sub": "str 2 sentences"},
+        "t3": {"headline": "str <= 12 words - about tab_subjects.t3", "sub": "str 2 sentences"},
+    },
+    "kpi_tags": ["one short badge per KPI card, in order, <= 6 words; must ADD something the card does not show (a rank, a share, a comparison, a caution) - never restate the value"],
+    "drivers": [{"title": "str <= 8 words naming the story", "text": "str 2-3 sentences grounded in themes and posts", "tag": "str <= 5 words", "tone": "pos|neg"}],
+    "callout": "str - one sentence naming the single sharpest finding",
+    "footer": ["2-3 one-line notes"],
+}
+
+
+def _apply_bci(sb: dict, raw: dict) -> None:
+    tabs_prose = raw.get("tabs") if isinstance(raw.get("tabs"), dict) else {}
+    if isinstance(raw.get("tabs"), list):  # tolerate a list of {id, headline, sub}
+        tabs_prose = {t.get("id"): t for t in raw["tabs"] if isinstance(t, dict)}
+    for tab in sb["tabs"]:
+        prose = tabs_prose.get(tab["id"])
+        if isinstance(prose, dict):
+            tab["banner"]["headline"] = _s(prose.get("headline"), 140) or tab["label"]
+            tab["banner"]["sub"] = _s(prose.get("sub") or prose.get("body"), 500)
+        elif not tab["banner"].get("headline"):
+            tab["banner"]["headline"] = tab["label"]
+
+    tags = _list(raw.get("kpi_tags"), len(sb["kpis"]), 60)
+    for card, tag in zip(sb["kpis"], tags):
+        card["tag"] = tag
+
+    drivers = raw.get("drivers") if isinstance(raw.get("drivers"), list) else []
+    sb["drivers"] = [
+        {
+            "tone": d.get("tone") if d.get("tone") in ("pos", "neg") else "pos",
+            "title": _s(d.get("title"), 100),
+            "text": _s(d.get("text"), 600),
+            "tag": _s(d.get("tag"), 60),
+        }
+        for d in drivers[:4]
+        if isinstance(d, dict) and _s(d.get("title"))
+    ]
+
+    sb["callout"] = _s(raw.get("callout"))
+    sb["footer"] = _list(raw.get("footer"), 3, 200) or [
+        f"{sb['meta']['total_conversations']:,} tagged posts \u00b7 {sb['meta']['window_label']}",
+        "InfoVision Intelligence \u00b7 Confidential",
+    ]
+
+
+# ── brand_health_storyboard ───────────────────────────────────────────────
+
+
+def _facts_health(sb: dict) -> dict:
+    return {
+        "brand": sb["meta"]["brand"],
+        "competitors": sb["meta"]["competitors"][:6],
+        "window": sb["meta"]["window_label"],
+        "total_articles": sb["meta"]["total_conversations"],
+        "classified": sb["meta"]["classified"],
+        "bhi": {k: v for k, v in sb["bhi"].items() if k != "contributions"},
+        "dimensions": [
+            {
+                "name": d["name"],
+                "score": d["score"],
+                "band": d["band"],
+                "volume": d["volume"],
+                "net_sentiment": d["net_sentiment"],
+                "top_sub_kpis": [k["name"] for k in d["sub_kpis"][:3]],
+            }
+            for d in sb["dimensions"]
+        ],
+        "competitive": {
+            "rank": sb["competitive"]["rank"],
+            "share_of_voice": sb["competitive"]["share_of_voice"][:5],
+            "co_mentions": sb["competitive"]["co_mentions"][:4],
+        },
+    }
+
+
+_SCHEMA_HEALTH = {
+    "hero": {"title": "str ≤ 12 words", "subtitle": "str 1-2 sentences", "chips": ["3-4 short stat chips"]},
+    "dimensions": [{"name": "dimension name", "headline": "str", "body": "str 2-3 sentences", "insights": ["2-3 bullets"]}],
+    "callout": "str — the composite verdict, 1-2 sentences",
+    "footer": ["2-3 one-line notes incl. that dimensions are keyword-derived from news"],
+}
+
+
+def _apply_health(sb: dict, raw: dict) -> None:
+    hero = raw.get("hero") or {}
+    sb["hero"]["title"] = _s(hero.get("title"), 120)
+    sb["hero"]["subtitle"] = _s(hero.get("subtitle"), 400)
+    sb["hero"]["chips"] = _list(hero.get("chips"), 4, 60)
+    by_name = {d["name"]: d for d in sb["dimensions"]}
+    for item in raw.get("dimensions") or []:
+        if isinstance(item, dict) and item.get("name") in by_name:
+            d = by_name[item["name"]]
+            d["headline"] = _s(item.get("headline"), 140)
+            d["body"] = _s(item.get("body"))
+            d["insights"] = _list(item.get("insights"), 3)
+    sb["callout"] = _s(raw.get("callout"))
+    sb["footer"] = _list(raw.get("footer"), 3, 200)
+
+
+# ── brand_intelligence ────────────────────────────────────────────────────
+
+
+def _facts_brand_intel(sb: dict) -> dict:
+    return {
+        "brand": sb["meta"]["brand"],
+        "competitors": sb["meta"]["competitors"][:6],
+        "window": sb["meta"]["window_label"],
+        "kpis": sb["hero"]["kpis"],
+        "trends": [
+            {
+                "id": t["id"],
+                "label": t["label"],
+                "stat": t["banner"]["stat"],
+                "growth": t.get("growth"),
+                "sentiment": t.get("sentiment"),
+                "leaders": [{"name": l["name"], "mentions": l["mentions"], "is_subject": l["is_subject"]} for l in t["leaders"]["items"]],
+                "verbatims": [v["text"][:160] for v in t.get("verbatims", [])[:2]],
+            }
+            for t in sb["tabs"]
+            if "growth" in t
+        ],
+    }
+
+
+_SCHEMA_BRAND_INTEL = {
+    "hero_subtitle": "str 1-2 sentences",
+    "overview_context": "str 2-3 sentences framing the category shifts",
+    "cards": [{"tab_id": "id from facts", "desc": "str 1 sentence"}],
+    "tabs": [
+        {
+            "id": "id from facts",
+            "banner_desc": "str 1-2 sentences",
+            "context": "str 2-3 sentences on why this trend matters",
+            "leaders": [{"name": "brand name from facts", "desc": "str 1 sentence"}],
+            "whats_next": {"title": "str", "sub": "str", "cta": "str ≤ 5 words"},
+        }
+    ],
+    "strategy": {"body": "str 3-4 sentences", "formula": ["3-4 short phrases"]},
+}
+
+
+def _apply_brand_intel(sb: dict, raw: dict) -> None:
+    sb["hero"]["subtitle"] = _s(raw.get("hero_subtitle"), 400)
+    sb["overview"]["context"] = _s(raw.get("overview_context"))
+    cards = {c["tab_id"]: c for c in sb["overview"]["cards"]}
+    for item in raw.get("cards") or []:
+        if isinstance(item, dict) and item.get("tab_id") in cards:
+            cards[item["tab_id"]]["desc"] = _s(item.get("desc"), 240)
+    tabs = {t["id"]: t for t in sb["tabs"]}
+    for item in raw.get("tabs") or []:
+        if not isinstance(item, dict) or item.get("id") not in tabs:
+            continue
+        t = tabs[item["id"]]
+        if "banner" in t:
+            t["banner"]["desc"] = _s(item.get("banner_desc"), 400)
+        t["context"] = _s(item.get("context"))
+        if "leaders" in t:
+            by_name = {l["name"]: l for l in t["leaders"]["items"]}
+            for l in item.get("leaders") or []:
+                if isinstance(l, dict) and l.get("name") in by_name:
+                    by_name[l["name"]]["desc"] = _s(l.get("desc"), 240)
+        wn = item.get("whats_next") or {}
+        if "whats_next" in t and isinstance(wn, dict):
+            t["whats_next"].update(
+                {"title": _s(wn.get("title"), 100), "sub": _s(wn.get("sub"), 200), "cta": _s(wn.get("cta"), 40)}
+            )
+    strat = raw.get("strategy") or {}
+    for t in sb["tabs"]:
+        if "strategy" in t:
+            t["strategy"]["body"] = _s(strat.get("body"), 900)
+            t["strategy"]["formula"] = _list(strat.get("formula"), 4, 80)
+
+
+# ── market_intelligence ───────────────────────────────────────────────────
+
+
+def _facts_market(sb: dict) -> dict:
+    return {
+        "brand": sb["meta"]["brand"],
+        "competitors": sb["meta"]["competitors"][:6],
+        "window": sb["meta"]["window_label"],
+        "periods": {"a": sb["meta"]["period_a"], "b": sb["meta"]["period_b"]},
+        "channel_impact": {
+            "leaders": sb["channel_impact"]["leaders"],
+            "sov": sb["channel_impact"]["sov"],
+            "by_platform": sb["channel_impact"].get("by_platform", {}),
+            "periods": [{"label": p["label"], "n": p["n"], "total": p["total"], "leaders": p["leaders"]} for p in sb["channel_impact"].get("periods", [])],
+            "change": sb["channel_impact"].get("change", {}),
+            "cards": [{"topic": c["topic"], "chip": c["chip"]} for c in sb["channel_impact"].get("takeaways", {}).get("cards", [])] if isinstance(sb["channel_impact"].get("takeaways"), dict) else [],
+        },
+        "industry_trends": sb["industry_trends"]["top"][:5],
+        "trend_tracking": [r for s in sb["trend_tracking"]["slides"] for r in s["rows"]][:8],
+        "volume": {k: sb["volume_trendline"].get(k) for k in ("total", "peak", "low", "growth_pct", "peak_subthemes")},
+        "key_themes": sb["key_themes"]["insights"][:6],
+        "top_brands": [{k: v for k, v in b.items() if k != "logo_url"} for b in sb["voice_of_user"]["top_brands"]],
+        "regional_prefs": [{k: v for k, v in r.items() if k not in ("flag",)} for r in sb["voice_of_user"]["regional_prefs"][:6]],
+        "brands": [
+            {"name": b["name"], "mentions": b["mentions"], "pct": b["pct"], "positive_text": b.get("positive_text"), "lead_platform": b.get("lead_platform")}
+            for b in sb["brand_analysis"]["brands"]
+        ],
+        "regions": [
+            {"name": r["name"], "n": r["n"], "share": r["share"], "leader": r["leader"], "top_themes": r["top_themes"]}
+            for r in sb["regional"]["regions"][:6]
+        ],
+    }
+
+
+_SCHEMA_MARKET = {
+    "channel_impact": {
+        "headline": "str",
+        "summary": "str one sentence on the loudest channel and who leads it",
+        "takeaways": {
+            "headline": "str one sentence: the volume/platform movement",
+            "thesis": "str one sentence: who leads and why it matters",
+            "cards": [{"topic": "topic from facts.channel_impact.cards", "title": "str <= 5 words", "text": "str 1-2 sentences"}],
+        },
+    },
+    "industry_trends": {"headline": "str", "drivers": [{"name": "category from facts", "drivers": ["2 bullets"]}]},
+    "trend_tracking": {"headline": "str", "insights": [{"category": "from facts", "insight": "str 1 sentence"}]},
+    "volume_trendline": {"headline": "str", "drivers": ["2-3 bullets"]},
+    "key_themes": {"headline": "str", "insights": [{"theme": "from facts", "text": "str 2 sentences"}]},
+    "voice_of_user": {"headline": "str 2 short paragraphs", "brands": [{"name": "from facts", "bullets": ["2-3 bullets"]}], "regional": [{"region": "from facts", "driver": "str 1 sentence"}]},
+    "brand_analysis": {"global_paragraphs": ["3-4 short paragraphs"], "takeaways": ["2 one-liners"], "brands": [{"name": "from facts", "summary": "str 2-3 sentences"}]},
+    "regional": [{"name": "region from facts", "summary": "str 1-2 sentences", "key_insights": ["2-3 bullets"]}],
+}
+
+
+def _apply_market(sb: dict, raw: dict) -> None:
+    ci = raw.get("channel_impact") if isinstance(raw.get("channel_impact"), dict) else {}
+    block = sb["channel_impact"]
+    block["headline"] = _s(ci.get("headline"))
+    block["summary"] = _s(ci.get("summary"), 400) or block.get("summary", "")
+    tk = ci.get("takeaways")
+    existing = block.get("takeaways") if isinstance(block.get("takeaways"), dict) else {"headline": "", "thesis": "", "cards": []}
+    if isinstance(tk, dict):
+        existing["headline"] = _s(tk.get("headline"), 400)
+        existing["thesis"] = _s(tk.get("thesis"), 400)
+        by_topic = {c.get("topic"): c for c in existing.get("cards", []) if isinstance(c, dict)}
+        for card in tk.get("cards") or []:
+            if isinstance(card, dict) and card.get("topic") in by_topic:
+                by_topic[card["topic"]]["title"] = _s(card.get("title"), 60)
+                by_topic[card["topic"]]["text"] = _s(card.get("text"), 300)
+    elif isinstance(tk, list):  # legacy bullets -> headline/thesis
+        bullets = _list(tk, 3)
+        existing["headline"] = bullets[0] if bullets else existing.get("headline", "")
+        existing["thesis"] = " ".join(bullets[1:]) if len(bullets) > 1 else existing.get("thesis", "")
+    existing.setdefault("cards", [])
+    block["takeaways"] = existing
+
+    it = raw.get("industry_trends") or {}
+    sb["industry_trends"]["headline"] = _s(it.get("headline"))
+    by_name = {r["name"]: r for r in sb["industry_trends"]["top"]}
+    for d in it.get("drivers") or []:
+        if isinstance(d, dict) and d.get("name") in by_name:
+            by_name[d["name"]]["drivers"] = _list(d.get("drivers"), 2)
+
+    tt = raw.get("trend_tracking") or {}
+    sb["trend_tracking"]["headline"] = _s(tt.get("headline"))
+    rows = {r["category"]: r for s in sb["trend_tracking"]["slides"] for r in s["rows"]}
+    for i in tt.get("insights") or []:
+        if isinstance(i, dict) and i.get("category") in rows:
+            rows[i["category"]]["insight"] = _s(i.get("insight"), 240)
+
+    vt = raw.get("volume_trendline") or {}
+    sb["volume_trendline"]["headline"] = _s(vt.get("headline"))
+    sb["volume_trendline"]["drivers"] = _list(vt.get("drivers"), 3)
+
+    kt = raw.get("key_themes") or {}
+    sb["key_themes"]["headline"] = _s(kt.get("headline"))
+    by_theme = {i["theme"]: i for i in sb["key_themes"]["insights"]}
+    for i in kt.get("insights") or []:
+        if isinstance(i, dict) and i.get("theme") in by_theme:
+            by_theme[i["theme"]]["text"] = _s(i.get("text"), 400)
+
+    vu = raw.get("voice_of_user") or {}
+    sb["voice_of_user"]["headline"] = _s(vu.get("headline"), 900)
+    by_brand = {b["name"]: b for b in sb["voice_of_user"]["top_brands"]}
+    for b in vu.get("brands") or []:
+        if isinstance(b, dict) and b.get("name") in by_brand:
+            by_brand[b["name"]]["bullets"] = _list(b.get("bullets"), 3)
+    by_region = {r["region"]: r for r in sb["voice_of_user"]["regional_prefs"]}
+    for r in vu.get("regional") or []:
+        if isinstance(r, dict) and r.get("region") in by_region:
+            by_region[r["region"]]["driver"] = _s(r.get("driver"), 240)
+
+    ba = raw.get("brand_analysis") or {}
+    sb["brand_analysis"]["global_paragraphs"] = _list(ba.get("global_paragraphs"), 4, 500)
+    sb["brand_analysis"]["takeaways"] = _list(ba.get("takeaways"), 2)
+    by_brand = {b["name"]: b for b in sb["brand_analysis"]["brands"]}
+    for b in ba.get("brands") or []:
+        if isinstance(b, dict) and b.get("name") in by_brand:
+            by_brand[b["name"]]["summary"] = _s(b.get("summary"))
+
+    by_region = {r["name"]: r for r in sb["regional"]["regions"]}
+    for r in raw.get("regional") or []:
+        if isinstance(r, dict) and r.get("name") in by_region:
+            by_region[r["name"]]["summary"] = _s(r.get("summary"), 400)
+            by_region[r["name"]]["key_insights"] = _list(r.get("key_insights"), 3)
+
+
+# ── network_map ───────────────────────────────────────────────────────────
+
+
+def _facts_network(sb: dict) -> dict:
+    return {
+        "brand": sb["meta"]["brand"],
+        "competitors": sb["meta"]["competitors"][:6],
+        "window": sb["meta"]["window_label"],
+        "total_articles": sb["meta"]["total_conversations"],
+        "communities": [
+            {
+                "id": c["id"],
+                "name": c["name"],
+                "share": c["share"],
+                "positive_rate": c["positive_rate"],
+                "negative_rate": c["negative_rate"],
+                "topics": [t["name"] for t in c["topics"][:3]],
+                "rivals": c["rivals"][:2],
+                "members": c["members"][:3],
+            }
+            for c in sb["communities"]
+        ],
+        "network_stats": sb["network_stats"],
+        "spotlight": (
+            {k: sb["spotlight"][k] for k in ("handle", "community", "kpis")} if sb.get("spotlight") else None
+        ),
+    }
+
+
+_SCHEMA_NETWORK = {
+    "hero": {"title": "str ≤ 12 words", "subtitle": "str 1-2 sentences", "chips": ["3-4 short stat chips"]},
+    "slides": [{"id": "s1|s2|s3", "title": "str", "body": "str 2-3 sentences"}],
+    "communities": [{"id": "int id from facts", "subtitle": "str ≤ 12 words", "insights": ["2-3 bullets"]}],
+    "spotlight": {"role": "str ≤ 6 words", "bio": "str 1-2 sentences", "implication": "str 1 sentence"},
+    "callout": "str 1-2 sentences",
+    "footer": ["2-3 one-line notes incl. that communities are derived from outlet sections/themes"],
+}
+
+
+def _apply_network(sb: dict, raw: dict) -> None:
+    hero = raw.get("hero") or {}
+    sb["hero"]["title"] = _s(hero.get("title"), 120)
+    sb["hero"]["subtitle"] = _s(hero.get("subtitle"), 400)
+    sb["hero"]["chips"] = _list(hero.get("chips"), 4, 60)
+    slides = {s["id"]: s for s in sb["slides"]}
+    for s in raw.get("slides") or []:
+        if isinstance(s, dict) and s.get("id") in slides:
+            slides[s["id"]]["title"] = _s(s.get("title"), 140)
+            slides[s["id"]]["body"] = _s(s.get("body"))
+    comms = {c["id"]: c for c in sb["communities"]}
+    for c in raw.get("communities") or []:
+        if not isinstance(c, dict):
+            continue
+        try:
+            cid = int(c.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if cid in comms:
+            comms[cid]["subtitle"] = _s(c.get("subtitle"), 100)
+            comms[cid]["insights"] = _list(c.get("insights"), 3)
+    spot = raw.get("spotlight") or {}
+    if sb.get("spotlight") and isinstance(spot, dict):
+        sb["spotlight"]["role"] = _s(spot.get("role"), 60)
+        sb["spotlight"]["bio"] = _s(spot.get("bio"), 400)
+        sb["spotlight"]["implication"] = _s(spot.get("implication"), 300)
+    sb["callout"] = _s(raw.get("callout"))
+    sb["footer"] = _list(raw.get("footer"), 3, 200)
+
+
+# ── dispatch ──────────────────────────────────────────────────────────────
+
+_REGISTRY = {
+    "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "brand_competitive_intel": (_facts_bci, _SCHEMA_BCI, _apply_bci, "Write the Brand & Competitive Intelligence copy."),
+    "brand_health_storyboard": (_facts_health, _SCHEMA_HEALTH, _apply_health, "Write the Brand Health Tracker copy."),
+    "brand_intelligence": (_facts_brand_intel, _SCHEMA_BRAND_INTEL, _apply_brand_intel, "Write the Brand Intelligence category-trends report copy."),
+    "market_intelligence": (_facts_market, _SCHEMA_MARKET, _apply_market, "Write the Market Intelligence report copy, one block per lens."),
+    "network_map": (_facts_network, _SCHEMA_NETWORK, _apply_network, "Write the Network Map storyboard copy."),
+}
+
+
+async def write_narrative(lens_key: str, storyboard: dict) -> dict:
+    """Fill prose fields in place. Returns the storyboard. Never raises."""
+    entry = _REGISTRY.get(lens_key)
+    if not entry:
+        return storyboard
+    facts_fn, schema, apply_fn, task = entry
+    try:
+        raw = await asyncio.wait_for(_ask(facts_fn(storyboard), schema, task), timeout=180)
+        apply_fn(storyboard, raw)
+        storyboard.setdefault("meta", {})["narrative"] = "ok"
+    except Exception as exc:
+        logger.warning("CI narrative failed for %s: %s", lens_key, exc)
+        storyboard.setdefault("meta", {})["narrative"] = f"failed: {type(exc).__name__}"
+    return storyboard

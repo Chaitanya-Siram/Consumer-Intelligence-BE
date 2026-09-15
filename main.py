@@ -9,6 +9,7 @@ from routers import (
     auth_router, user_router, organization_router, data_provider_keys_router,
     workflow_agent_router
 )
+from consumer_intelligence.router import router as consumer_intelligence_router
 
 init_db()
 
@@ -36,3 +37,4 @@ app.include_router(agent_router)
 app.include_router(project_router)
 app.include_router(data_provider_keys_router)
 app.include_router(workflow_agent_router)
+app.include_router(consumer_intelligence_router)
