@@ -8,6 +8,8 @@ venv*
 
 # Config File
 .env
+.env.*
+!.env.example
 
 # Ignore config file
 
@@ -28,3 +30,5 @@ tesla*
 frontend
 dump*
 example_user_input*
+# Playwright MCP screenshots/snapshots
+.playwright-mcp/

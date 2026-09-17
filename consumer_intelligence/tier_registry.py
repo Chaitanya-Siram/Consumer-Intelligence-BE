@@ -13,16 +13,16 @@ CI_LENS_KEYS: set[str] = {
     "brand_competitive_intel",
     "market_intelligence",
     "network_map",
+    "track_emerging_issues",
+    "shifting_audience_priorities",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
 COMING_SOON_TIER1: set[str] = {
     "landscape_analysis",
-    "advanced_metrics",
     "influencer_mapping",
     "whitespace_gap_analysis",
     "regional_intelligence",
-    "issues_intelligence",
     "crisis_solutioning",
 }
 
@@ -33,6 +33,11 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     "brand_intelligence": ["brand_intelligence"],
     "market_intelligence": ["market_intelligence"],
     "network_map_analysis": ["network_map"],
+    # Tier 2 lenses shipped so far under these pillars. The other Tier 2s
+    # ("Categorized", "Real-time", "Emerging Themes", ...) stay coming-soon in
+    # the FE until a builder exists; add its LENS_KEY here when it does.
+    "issues_intelligence": ["track_emerging_issues"],
+    "advanced_metrics": ["shifting_audience_priorities"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],

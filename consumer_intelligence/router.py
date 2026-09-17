@@ -34,6 +34,70 @@ from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, 
 router = APIRouter(tags=["consumer-intelligence"])
 
 
+def _required_lenses(nodes: list[dict], requested: list[str] | None) -> list[str]:
+    """Every CI lens key this session should carry, bundles expanded."""
+    if requested:
+        return expand_lenses([k for k in requested if k in CI_LENS_KEYS])
+    resolved, _ = resolve_ci_lenses(nodes)
+    return expand_lenses(resolved)
+
+
+def _cached_lenses(cached: dict | None) -> set[str]:
+    """Lens keys already present in a cached payload with a real storyboard
+    (not a failed/coming-soon stub)."""
+    if not isinstance(cached, dict):
+        return set()
+    return {
+        k for k, v in cached.items()
+        if k in CI_LENS_KEYS and isinstance(v, dict) and v.get("status") not in {"failed", "coming_soon"} and (v.get("meta") or v.get("tabs") or v.get("loyalty"))
+    }
+
+
+def _plan(session_id: int, nodes: list[dict], requested: list[str] | None, refresh: bool) -> tuple[dict | None, list[str], set[str] | None, list[str]]:
+    """(cached_payload, required_lenses, lenses_to_skip, lenses_to_build).
+
+    Without refresh: build only required lenses absent from the cache.
+    With refresh: rebuild every required lens, keep cached lenses that were not
+    requested (so `?lenses=x&refresh=true` refreshes x without dropping the rest).
+    """
+    cached = _load_cache(session_id)
+    required = _required_lenses(nodes, requested)
+    have = _cached_lenses(cached)
+    if refresh:
+        skip = have - set(required)
+        missing = list(required)
+    else:
+        skip = set(have)
+        missing = [k for k in required if k not in have]
+    return cached, required, (skip if cached else None), missing
+
+
+def _merge_payload(cached: dict | None, fresh: dict) -> dict:
+    """Fresh lenses win; cached lenses not rebuilt are kept; meta reflects both.
+
+    Lets a session that already has Brand Intelligence cached pick up a newly
+    shipped lens (or one newly added to its workflow) without rebuilding the
+    lenses it already has and without the FE having to pass refresh=true."""
+    if not isinstance(cached, dict):
+        return fresh
+    out = dict(cached)
+    for k, v in fresh.items():
+        if k in ("meta", "coming_soon"):
+            continue
+        out[k] = v
+    cached_meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    fresh_meta = fresh.get("meta") if isinstance(fresh.get("meta"), dict) else {}
+    lenses = list(dict.fromkeys([*(cached_meta.get("lenses") or []), *(fresh_meta.get("lenses") or [])]))
+    out["meta"] = {**cached_meta, **fresh_meta, "lenses": lenses, "incremental": sorted(fresh_meta.get("built") or [])}
+    still_coming = set((fresh.get("coming_soon") or {}).keys())
+    out["coming_soon"] = {k: {"status": "coming_soon"} for k in sorted(still_coming)}
+    for key in list(out.keys()):
+        v = out[key]
+        if isinstance(v, dict) and v.get("status") == "coming_soon" and key not in still_coming:
+            del out[key]   # a Tier 1 that was coming soon when cached and has since shipped
+    return out
+
+
 def _cache_key(session_id: int) -> str:
     return f"session_files/session_{session_id}/ci_charts_data/latest.json"
 
@@ -93,11 +157,6 @@ async def ci_charts(
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
-    if not refresh:
-        cached = _load_cache(session_id)
-        if cached:
-            return cached
-
     nodes = _workflow_nodes(record)
     if not lenses:
         resolved, coming = resolve_ci_lenses(nodes)
@@ -107,8 +166,17 @@ async def ci_charts(
                 detail="No Consumer Intelligence lens selected in this session's workflow. Pass ?lenses= explicitly.",
             )
 
+    # Incremental cache: return the cached payload only when it already holds
+    # every lens this session needs; otherwise build just the missing ones.
+    # `refresh` rebuilds the required lenses but keeps other cached lenses.
+    cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh)
+    if cached and not missing:
+        return cached
+
     tagged_articles = _articles_for_charts(db, session_id)
     if not tagged_articles:
+        if cached:
+            return cached
         raise HTTPException(status_code=404, detail="No relevant tagged articles for this session.")
 
     try:
@@ -120,10 +188,11 @@ async def ci_charts(
             brand_keywords=record.brand_keywords,
             competitor_keywords=record.competitor_keywords,
             with_media=with_media,
+            skip_lenses=skip,
         )
-        response = jsonable_encoder(payload)
+        response = jsonable_encoder(_merge_payload(cached, payload))
         _save_cache(session_id, response)
-        logger.info("CI charts generated for session_id=%s in %.1fs", session_id, time.time() - started)
+        logger.info("CI charts generated for session_id=%s (%s) in %.1fs", session_id, ",".join(missing), time.time() - started)
         return response
     except HTTPException:
         raise
@@ -162,16 +231,18 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             await websocket.send_json({"type": "error", "detail": "Session not found."})
             return
 
-        if not refresh:
-            cached = _load_cache(session_id)
-            if cached:
-                await websocket.send_json({"type": "complete", "cached": True, "charts_data": cached})
-                return
-
         nodes = _workflow_nodes(record)
+        cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh)
+        if cached and not missing:
+            await websocket.send_json({"type": "complete", "cached": True, "charts_data": cached})
+            return
+
         tagged_articles = _articles_for_charts(db, session_id)
         if not tagged_articles:
-            await websocket.send_json({"type": "error", "detail": "No relevant tagged articles for this session."})
+            if cached:
+                await websocket.send_json({"type": "complete", "cached": True, "charts_data": cached})
+            else:
+                await websocket.send_json({"type": "error", "detail": "No relevant tagged articles for this session."})
             return
 
         send_lock = asyncio.Lock()
@@ -189,13 +260,15 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             competitor_keywords=record.competitor_keywords,
             on_event=emit,
             with_media=bool(with_media),
+            skip_lenses=skip,
         )
-        response = jsonable_encoder(payload)
+        response = jsonable_encoder(_merge_payload(cached, payload))
         _save_cache(session_id, response)
         await emit(
             {
                 "type": "complete",
                 "cached": False,
+                "incremental": bool(cached),
                 "charts_data": response,
                 "elapsed_seconds": round(time.time() - started, 1),
             }

@@ -14,8 +14,8 @@ import logging
 import time
 from typing import Any, Awaitable, Callable
 
-from . import brand_media
-from .storyboard import bci, brand_intel, health, market_intel, network_map, trend
+from . import brand_media, taxonomy
+from .storyboard import audience_priorities, bci, brand_intel, emerging_issues, health, market_intel, network_map, trend
 from .storyboard.narrative import write_narrative
 from .tier_registry import COMING_SOON_TIER1, resolve_ci_lenses
 
@@ -30,7 +30,13 @@ _MODULES = {
     bci.LENS_KEY: bci,
     market_intel.LENS_KEY: market_intel,
     network_map.LENS_KEY: network_map,
+    emerging_issues.LENS_KEY: emerging_issues,
+    audience_priorities.LENS_KEY: audience_priorities,
 }
+
+# Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
+# The taxonomy is computed once per build and shared across these lenses.
+_NEEDS_TAXONOMY = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY}
 
 # Build order: cheapest first so the client sees something quickly.
 _ORDER = [
@@ -40,6 +46,8 @@ _ORDER = [
     brand_intel.LENS_KEY,
     network_map.LENS_KEY,
     market_intel.LENS_KEY,
+    emerging_issues.LENS_KEY,
+    audience_priorities.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -51,7 +59,12 @@ _HERO_QUERY = {
     bci.LENS_KEY: "business competition strategy",
     market_intel.LENS_KEY: "global market analysis",
     network_map.LENS_KEY: "network connections abstract",
+    emerging_issues.LENS_KEY: "customer complaint attention warning",
+    audience_priorities.LENS_KEY: "loyal customers audience priorities",
 }
+
+# Lenses whose screens carry their own hero art; skip Pexels for them.
+_NO_HERO_MEDIA = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY}
 
 
 
@@ -98,15 +111,23 @@ async def _build_one(
     on_event: EmitFn | None,
     *,
     with_media: bool,
+    theme_taxonomy: dict | None = None,
 ) -> dict:
     module = _MODULES[lens_key]
     started = time.time()
 
     await _emit(on_event, {"type": "progress", "stage": "storyboard", "lens": lens_key, "message": f"Computing {lens_key} metrics…"})
-    storyboard = await asyncio.to_thread(module.build_storyboard, articles, brand=brand, known_brands=known_brands)
+    kwargs: dict[str, Any] = {"brand": brand, "known_brands": known_brands}
+    if lens_key == audience_priorities.LENS_KEY:
+        kwargs["taxonomy_groups"] = theme_taxonomy or {}
+    storyboard = await asyncio.to_thread(module.build_storyboard, articles, **kwargs)
+    if lens_key in _NEEDS_TAXONOMY and theme_taxonomy is not None:
+        storyboard.setdefault("meta", {})["taxonomy"] = taxonomy.summary(theme_taxonomy)
 
     await _emit(on_event, {"type": "progress", "stage": "narrative", "lens": lens_key, "message": f"Writing {lens_key} narrative…"})
     tasks: list[Awaitable[Any]] = [write_narrative(lens_key, storyboard)]
+    if lens_key in _NO_HERO_MEDIA:
+        with_media = False
     if with_media:
         tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip()))
         tasks.append(brand_media.resolve_brand_assets(brand, articles))
@@ -138,11 +159,14 @@ async def build_ci_charts(
     competitor_keywords: list[str] | None,
     on_event: EmitFn | None = None,
     with_media: bool = True,
+    skip_lenses: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build every selected CI lens. Returns `{lens_key: storyboard, ..., "coming_soon": {...}, "meta": {...}}`.
 
     Lens selection: `requested_lenses` if given, else resolved from the
     session's workflow analysis nodes. Unknown keys are ignored.
+    `skip_lenses` are selected lenses the caller already has (cached) and does
+    not want rebuilt; they are reported in meta but not built.
     """
     if requested_lenses:
         lens_keys = [k for k in requested_lenses if k in _MODULES]
@@ -151,17 +175,25 @@ async def build_ci_charts(
         lens_keys, coming_soon = resolve_ci_lenses(workflow_nodes or [])
 
     lens_keys = expand_lenses(lens_keys)
+    to_build = [k for k in lens_keys if k not in (skip_lenses or set())]
     tagged_articles = normalize_articles(tagged_articles)
     brand = (brand_keywords or [""])[0] or ""
     known = list(dict.fromkeys([b for b in [*(brand_keywords or []), *(competitor_keywords or [])] if b]))
 
-    await _emit(on_event, {"type": "start", "lenses": lens_keys, "coming_soon": coming_soon, "total_articles": len(tagged_articles)})
+    await _emit(on_event, {"type": "start", "lenses": to_build, "cached": sorted(set(lens_keys) - set(to_build)), "coming_soon": coming_soon, "total_articles": len(tagged_articles)})
+
+    theme_taxonomy: dict | None = None
+    if any(k in _NEEDS_TAXONOMY for k in to_build):
+        await _emit(on_event, {"type": "progress", "stage": "taxonomy", "lens": None, "message": "Grouping themes…"})
+        theme_taxonomy = await taxonomy.canonicalize(tagged_articles, brand=brand)
+        taxonomy.annotate(tagged_articles, theme_taxonomy)
+        logger.info("CI taxonomy: %s groups via %s from %s raw themes", len(theme_taxonomy.get("groups", [])), theme_taxonomy.get("method"), theme_taxonomy.get("raw_distinct"))
 
     out: dict[str, Any] = {}
     started = time.time()
-    for lens_key in lens_keys:
+    for lens_key in to_build:
         try:
-            out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media)
+            out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media, theme_taxonomy=theme_taxonomy)
             await _emit(on_event, {"type": "lens_complete", "lens": lens_key, "storyboard": out[lens_key]})
         except Exception as exc:
             logger.exception("CI lens %s failed", lens_key)
@@ -175,6 +207,7 @@ async def build_ci_charts(
     out["meta"] = {
         "provider": "consumer_intelligence",
         "lenses": lens_keys,
+        "built": to_build,
         "coming_soon": coming_soon,
         "brand": brand,
         "competitors": [b for b in known if b != brand],

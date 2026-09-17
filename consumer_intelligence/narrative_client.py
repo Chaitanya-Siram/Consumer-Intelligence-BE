@@ -16,12 +16,14 @@ from configs import envs, logger
 class CINarrativeClient:
     """Thin async JSON-mode chat client for CI narrative prose."""
 
-    async def complete_json(self, messages: list[dict]) -> dict:
+    async def complete_json(self, messages: list[dict], *, temperature: float = 0.3) -> dict:
+        """`temperature` 0 for classification calls (theme taxonomy) so the
+        grouping, and every index computed on it, stays stable between runs."""
         if envs.LLM_PROVIDER == "claude":
-            return await self._call_claude(messages)
-        return await self._call_azure(messages)
+            return await self._call_claude(messages, temperature=temperature)
+        return await self._call_azure(messages, temperature=temperature)
 
-    async def _call_azure(self, messages: list[dict]) -> dict:
+    async def _call_azure(self, messages: list[dict], *, temperature: float = 0.3) -> dict:
         import httpx
 
         if not envs.AZURE_OPENAI_API_KEY or not envs.AZURE_OPENAI_ENDPOINT:
@@ -35,7 +37,7 @@ class CINarrativeClient:
         )
         body = {
             "messages": messages,
-            "temperature": 0.3,
+            "temperature": temperature,
             "response_format": {"type": "json_object"},
         }
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -51,7 +53,7 @@ class CINarrativeClient:
             data = response.json()
         return json.loads(data["choices"][0]["message"]["content"])
 
-    async def _call_claude(self, messages: list[dict]) -> dict:
+    async def _call_claude(self, messages: list[dict], *, temperature: float = 0.3) -> dict:
         from anthropic import AsyncAnthropic
 
         if not envs.ANTHROPIC_API_KEY:
@@ -65,6 +67,7 @@ class CINarrativeClient:
         response = await client.messages.create(
             model=envs.CLAUDE_MODEL,
             max_tokens=4096,
+            temperature=temperature,
             system=system_text + "\n\nReturn JSON only. No markdown fences.",
             messages=user_messages,
         )

@@ -624,8 +624,230 @@ def _apply_network(sb: dict, raw: dict) -> None:
 
 # ── dispatch ──────────────────────────────────────────────────────────────
 
+# ── track_emerging_issues ─────────────────────────────────────────────────
+
+_TONES = {"pos", "neg", "neu"}
+
+
+def _facts_issues(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"],
+        "competitors": meta["competitors"][:6],
+        "window": meta["window"],
+        "platforms": meta["platforms"],
+        "total_mentions": meta["total_mentions"],
+        "issue": meta.get("issue"),
+        "theme_groups": [{"name": g["name"], "bucket": g.get("bucket"), "count": g.get("count"), "raw_examples": g.get("raw", [])[:6]} for g in (meta.get("taxonomy") or {}).get("groups", [])],
+        "trend": {"grain": sb["trend"].get("grain"), "points": sb["trend"]["points"], "annotations": [{"at": a["at"], "kind": a["kind"], "label": a["label"], "value": a["value"]} for a in sb["trend"]["annotations"]]},
+        "issue_platform_split": sb["behaviour"].get("platform_split", []),
+        "banner_stats": {"journey": sb["journey"]["banner"]["stats"], "behaviour": sb["behaviour"]["banner"]["stats"], "themes": sb["themes"]["banner"]["stats"]},
+        "themes": {"funnel": sb["themes"]["funnel"], "rows": [{"name": r["name"], "pct": r["pct"], "count": r["count"]} for r in sb["themes"]["rows"]]},
+        "motivation": {"basis": sb["motivation"].get("basis"), "split": sb["motivation"]["split"]},
+        "multi": {
+            "holders": sb["multi"].get("holders", []),
+            "sentiment": sb["multi"].get("sentiment", []),
+            "single": {"rows": sb["multi"].get("single", {}).get("rows", []), "quote": sb["multi"].get("single", {}).get("quote")},
+            "multiple": {"rows": sb["multi"].get("multiple", {}).get("rows", []), "quote": sb["multi"].get("multiple", {}).get("quote")},
+        },
+        "evidence": {
+            "issue_quotes": [{"text": q["text"][:220], "source": q["source"]} for q in ev.get("issue_quotes", [])],
+            "brand_quotes": [{"text": q["text"][:220], "source": q["source"]} for q in ev.get("brand_quotes", [])],
+            "unmet_needs": ev.get("unmet_needs", []),
+            "product_mentions": ev.get("product_mentions", []),
+        },
+    }
+
+
+_SCHEMA_ISSUES = {
+    "issue_name": "str ≤ 6 words naming the emerging issue (from facts.issue.group and evidence)",
+    "journey": {
+        "headline": "str ≤ 12 words",
+        "sub": "str 1-2 sentences",
+        "stages": [
+            {
+                "label": "str 2-4 words, lifecycle stage the audience moves through",
+                "steps": [{"title": "str 2-5 words", "detail": "str ≤ 25 words, optional, cite real products/brands/platforms from facts"}],
+                "gate": "bool, true only for a decision stage",
+                "outcomes": [{"label": "str", "tone": "pos|neg|neu"}],
+                "note": "str, optional",
+            }
+        ],
+        "_rules": "3 to 5 stages, ordered from discovery to outcome; steps 2-4 per stage; a gate stage has outcomes",
+    },
+    "trend": {"title": "str e.g. 'Mention trendline · <issue>'", "headline": "str one-sentence read of the curve", "annotations": [{"at": "int from facts.trend.annotations", "text": "str ≤ 20 words"}]},
+    "behaviour": {
+        "headline": "str ≤ 12 words",
+        "sub": "str 1-2 sentences",
+        "profile": [{"title": "Behaviour|Interests|Attitude", "sub": "str ≤ 10 words", "points": ["2-3 bullets ≤ 15 words"]}],
+        "usage_note": "str 1 sentence",
+        "usage": [{"title": "str 2-5 words", "segments": ["str 1-2 audience segments"], "points": ["2-3 bullets"]}],
+        "_rules": "exactly 3 profile cards in that order; exactly 4 usage cards grounded in product_mentions/platforms",
+    },
+    "themes": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "rows": [{"name": "name from facts.themes.rows", "text": "str one sentence on what that theme says"}]},
+    "motivation": {"note": "str 1 sentence", "drivers": [{"title": "name from facts.motivation.split", "text": "str one sentence"}]},
+    "multi": {"note": "str 1 sentence", "single_points": ["2-3 bullets"], "multiple_points": ["2-3 bullets"]},
+}
+
+
+def _apply_issues(sb: dict, raw: dict) -> None:
+    issue_name = _s(raw.get("issue_name"), 60)
+    if issue_name:
+        sb["meta"].setdefault("issue", {})
+        if isinstance(sb["meta"]["issue"], dict):
+            sb["meta"]["issue"]["name"] = issue_name
+
+    j = raw.get("journey") or {}
+    sb["journey"]["banner"]["headline"] = _s(j.get("headline"), 120)
+    sb["journey"]["banner"]["sub"] = _s(j.get("sub"), 400)
+    stages = []
+    for st in (j.get("stages") or [])[:5]:
+        if not isinstance(st, dict) or not _s(st.get("label"), 60):
+            continue
+        stage = {"label": _s(st.get("label"), 60)}
+        steps = [
+            {"title": _s(s.get("title"), 80), **({"detail": _s(s.get("detail"), 240)} if _s(s.get("detail")) else {})}
+            for s in (st.get("steps") or []) if isinstance(s, dict) and _s(s.get("title"))
+        ][:4]
+        if steps:
+            stage["steps"] = steps
+        if st.get("gate") is True:
+            stage["gate"] = True
+            outcomes = [
+                {"label": _s(o.get("label"), 40), "tone": o.get("tone") if o.get("tone") in _TONES else "neu"}
+                for o in (st.get("outcomes") or []) if isinstance(o, dict) and _s(o.get("label"))
+            ][:4]
+            if outcomes:
+                stage["outcomes"] = outcomes
+        if _s(st.get("note")):
+            stage["note"] = _s(st.get("note"), 240)
+        stages.append(stage)
+    if len(stages) >= 3:
+        sb["journey"]["stages"] = stages
+        sb["journey"]["banner"]["stats"][0]["value"] = str(len(stages))
+
+    t = raw.get("trend") or {}
+    sb["trend"]["title"] = _s(t.get("title"), 120) or (f"Mention trendline · {issue_name}" if issue_name else "Mention trendline")
+    sb["trend"]["headline"] = _s(t.get("headline"), 240)
+    by_at = {a["at"]: a for a in sb["trend"]["annotations"]}
+    for item in t.get("annotations") or []:
+        if isinstance(item, dict) and item.get("at") in by_at:
+            by_at[item["at"]]["text"] = _s(item.get("text"), 160)
+    sb["trend"]["annotations"] = [a for a in sb["trend"]["annotations"] if a.get("text")]
+
+    b = raw.get("behaviour") or {}
+    sb["behaviour"]["banner"]["headline"] = _s(b.get("headline"), 120)
+    sb["behaviour"]["banner"]["sub"] = _s(b.get("sub"), 400)
+    by_title = {p["title"].lower(): p for p in sb["behaviour"]["profile"]}
+    for item in b.get("profile") or []:
+        if isinstance(item, dict) and str(item.get("title") or "").lower() in by_title:
+            card = by_title[str(item["title"]).lower()]
+            card["sub"] = _s(item.get("sub"), 80)
+            card["points"] = _list(item.get("points"), 3, 160)
+    sb["behaviour"]["usage_note"] = _s(b.get("usage_note"), 240)
+    sb["behaviour"]["usage"] = [
+        {"title": _s(u.get("title"), 60), "segments": _list(u.get("segments"), 2, 60), "points": _list(u.get("points"), 3, 160)}
+        for u in (b.get("usage") or []) if isinstance(u, dict) and _s(u.get("title"))
+    ][:4]
+
+    th = raw.get("themes") or {}
+    sb["themes"]["banner"]["headline"] = _s(th.get("headline"), 120)
+    sb["themes"]["banner"]["sub"] = _s(th.get("sub"), 400)
+    rows = {r["name"]: r for r in sb["themes"]["rows"]}
+    for item in th.get("rows") or []:
+        if isinstance(item, dict) and item.get("name") in rows:
+            rows[item["name"]]["text"] = _s(item.get("text"), 200)
+
+    m = raw.get("motivation") or {}
+    sb["motivation"]["note"] = _s(m.get("note"), 240)
+    drivers = {d["title"]: d for d in sb["motivation"]["drivers"]}
+    for item in m.get("drivers") or []:
+        if isinstance(item, dict) and item.get("title") in drivers:
+            drivers[item["title"]]["text"] = _s(item.get("text"), 200)
+
+    mu = raw.get("multi") or {}
+    sb["multi"]["note"] = _s(mu.get("note"), 240)
+    if "single" in sb["multi"]:
+        sb["multi"]["single"]["points"] = _list(mu.get("single_points"), 3, 160)
+    if "multiple" in sb["multi"]:
+        sb["multi"]["multiple"]["points"] = _list(mu.get("multiple_points"), 3, 160)
+
+
+# ── shifting_audience_priorities ──────────────────────────────────────────
+
+
+def _facts_priorities(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"],
+        "competitors": meta["competitors"][:6],
+        "top_competitor": meta.get("top_competitor"),
+        "window": meta["window"],
+        "grain": meta["grain"],
+        "total_mentions": meta["total_mentions"],
+        "method": meta.get("method"),
+        "bucket_shares_pct": meta.get("bucket_shares"),
+        "theme_groups": [{"name": g["name"], "bucket": g.get("bucket"), "count": g.get("count"), "raw_examples": g.get("raw", [])[:5]} for g in (meta.get("taxonomy") or {}).get("groups", [])],
+        "loyalty": {"stats": sb["loyalty"]["banner"]["stats"], "index": {k: sb["loyalty"]["index"][k] for k in ("value", "prior", "min", "max")}, "tracking": sb["loyalty"]["tracking"]},
+        "trend": {"points": sb["trend"]["points"], "spikes": [{"at": s["at"], "label": s["label"], "ratio": s["ratio"], "evidence": s.get("evidence")} for s in sb["trend"]["spikes"]], "stats": sb["trend"]["banner"]["stats"]},
+        "monthly": {"score": sb["monthly"]["score"], "scale": f"{sb['monthly']['min']}-{sb['monthly']['max']}", "band": sb["monthly"].get("band"), "bands": sb["monthly"]["bands"]},
+        "benchmark": sb["benchmark"],
+        "evidence": {
+            "brand_quotes": [{"text": q["text"][:220], "source": q["source"]} for q in ev.get("brand_quotes", [])],
+            "competitor_quotes": [{"text": q["text"][:220], "source": q["source"]} for q in ev.get("competitor_quotes", [])],
+            "top_groups": ev.get("top_groups", []),
+        },
+    }
+
+
+_SCHEMA_PRIORITIES = {
+    "category": "str ≤ 5 words naming the product category the brand competes in",
+    "loyalty": {
+        "headline": "str ≤ 12 words",
+        "sub": "str 1-2 sentences",
+        "index_note": "str one sentence on what drives the index value",
+        "lead": "str 2-3 sentences explaining how the loyalty read is derived for this category; <b>…</b> allowed for key terms",
+        "params": [{"key": "nps|sentiment|usage|switch", "text": "str one sentence tailoring the parameter to this category"}],
+    },
+    "trend": {
+        "headline": "str ≤ 12 words",
+        "sub": "str 1-2 sentences",
+        "note": "str 1-2 sentences reading the curve",
+        "spikes": [{"at": "int from facts.trend.spikes", "label": "str ≤ 6 words naming what drove that period (from its evidence)", "text": "str ≤ 25 words"}],
+    },
+    "monthly_text": "str 1-2 sentences; must name the band from facts.monthly.band (weak/moderate/strong) and explain the score against the benchmark rows — never call a 'weak' band 'upper' or 'strong'",
+}
+
+
+def _apply_priorities(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _s(raw.get("category"), 60)
+    lo = raw.get("loyalty") or {}
+    sb["loyalty"]["banner"]["headline"] = _s(lo.get("headline"), 120)
+    sb["loyalty"]["banner"]["sub"] = _s(lo.get("sub"), 400)
+    sb["loyalty"]["index"]["note"] = _s(lo.get("index_note"), 200)
+    sb["loyalty"]["lead"] = _s(lo.get("lead"), 600)
+    by_key = {p["key"]: p for p in sb["loyalty"]["params"]}
+    for item in lo.get("params") or []:
+        if isinstance(item, dict) and item.get("key") in by_key:
+            by_key[item["key"]]["text"] = _s(item.get("text"), 200)
+
+    tr = raw.get("trend") or {}
+    sb["trend"]["banner"]["headline"] = _s(tr.get("headline"), 120)
+    sb["trend"]["banner"]["sub"] = _s(tr.get("sub"), 400)
+    sb["trend"]["note"] = _s(tr.get("note"), 300)
+    by_at = {s["at"]: s for s in sb["trend"]["spikes"]}
+    for item in tr.get("spikes") or []:
+        if isinstance(item, dict) and item.get("at") in by_at:
+            if _s(item.get("label")):
+                by_at[item["at"]]["label"] = _s(item.get("label"), 60)
+            by_at[item["at"]]["text"] = _s(item.get("text"), 200)
+    sb["monthly"]["text"] = _s(raw.get("monthly_text"), 300)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "track_emerging_issues": (_facts_issues, _SCHEMA_ISSUES, _apply_issues, "Write the Track Emerging Issues storyboard copy. The issue is facts.issue.group; name it plainly, describe the audience journey around it, and ground every claim in the numbers and quotes given."),
+    "shifting_audience_priorities": (_facts_priorities, _SCHEMA_PRIORITIES, _apply_priorities, "Write the Shifting Audience Priorities (brand loyalty index) copy. Explain the index in this category's terms and label each spike from its evidence."),
     "brand_competitive_intel": (_facts_bci, _SCHEMA_BCI, _apply_bci, "Write the Brand & Competitive Intelligence copy."),
     "brand_health_storyboard": (_facts_health, _SCHEMA_HEALTH, _apply_health, "Write the Brand Health Tracker copy."),
     "brand_intelligence": (_facts_brand_intel, _SCHEMA_BRAND_INTEL, _apply_brand_intel, "Write the Brand Intelligence category-trends report copy."),
