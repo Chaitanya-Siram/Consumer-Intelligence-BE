@@ -16,6 +16,7 @@ CI_LENS_KEYS: set[str] = {
     "track_emerging_issues",
     "shifting_audience_priorities",
     "perception_analysis",
+    "dominant_narratives",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
@@ -38,7 +39,7 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     # the FE until a builder exists; add its LENS_KEY here when it does.
     "issues_intelligence": ["track_emerging_issues"],
     "advanced_metrics": ["shifting_audience_priorities"],
-    "landscape_analysis": ["perception_analysis"],
+    "landscape_analysis": ["perception_analysis", "dominant_narratives"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],
@@ -49,6 +50,7 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
 # behaviour: every registered lens under a selected Tier 1 is built.
 TIER2_GATE: dict[str, str] = {
     "perception_analysis": "Perception Analysis",
+    "dominant_narratives": "Dominant Narratives",
 }
 
 

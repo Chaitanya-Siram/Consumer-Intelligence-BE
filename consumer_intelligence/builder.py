@@ -15,7 +15,18 @@ import time
 from typing import Any, Awaitable, Callable
 
 from . import brand_media, taxonomy
-from .storyboard import audience_priorities, bci, brand_intel, emerging_issues, health, market_intel, network_map, perception, trend
+from .storyboard import (
+    audience_priorities,
+    bci,
+    brand_intel,
+    dominant_narratives,
+    emerging_issues,
+    health,
+    market_intel,
+    network_map,
+    perception,
+    trend,
+)
 from .storyboard.narrative import write_narrative
 from .tier_registry import COMING_SOON_TIER1, resolve_ci_lenses
 
@@ -33,6 +44,7 @@ _MODULES = {
     emerging_issues.LENS_KEY: emerging_issues,
     audience_priorities.LENS_KEY: audience_priorities,
     perception.LENS_KEY: perception,
+    dominant_narratives.LENS_KEY: dominant_narratives,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
@@ -41,8 +53,8 @@ _NEEDS_TAXONOMY = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY}
 
 # Lenses whose module exposes `async prepare(articles, brand=, known_brands=)`
 # get its result passed to build_storyboard(prepared=...). Used for per-lens
-# LLM classification (e.g. perception themes, negative emotion).
-_HAS_PREPARE = {perception.LENS_KEY}
+# LLM classification (e.g. perception themes, negative emotion, narrative labels).
+_HAS_PREPARE = {perception.LENS_KEY, dominant_narratives.LENS_KEY}
 
 # Build order: cheapest first so the client sees something quickly.
 _ORDER = [
@@ -55,6 +67,7 @@ _ORDER = [
     emerging_issues.LENS_KEY,
     audience_priorities.LENS_KEY,
     perception.LENS_KEY,
+    dominant_narratives.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -69,10 +82,11 @@ _HERO_QUERY = {
     emerging_issues.LENS_KEY: "customer complaint attention warning",
     audience_priorities.LENS_KEY: "loyal customers audience priorities",
     perception.LENS_KEY: "consumer perception emotions",
+    dominant_narratives.LENS_KEY: "conversation landscape narratives",
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
-_NO_HERO_MEDIA = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY, perception.LENS_KEY}
+_NO_HERO_MEDIA = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY, perception.LENS_KEY, dominant_narratives.LENS_KEY}
 
 
 

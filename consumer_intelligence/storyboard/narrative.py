@@ -975,8 +975,192 @@ def _apply_perception(sb: dict, raw: dict) -> None:
             d.pop("raw_theme", None)
 
 
+# ── dominant_narratives ───────────────────────────────────────────────────
+
+
+def _facts_narratives(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"],
+        "competitors": meta["competitors"][:6],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "usage": {
+            "stats": sb["usage"]["banner"]["stats"],
+            "groups": [{"key": g["key"], "title": g["title"], "count": g["count"], "sample_posts": ev.get("usage", {}).get(g["key"], [])} for g in sb["usage"]["groups"]],
+        },
+        "observations": {
+            "columns": [
+                {
+                    "key": c["key"],
+                    "q": c["q"],
+                    "count": c.get("count", 0),
+                    "reco": c.get("reco", False),
+                    # The recommendations column synthesises the other four, so it sees their evidence.
+                    "sample_posts": (
+                        [p for k in ("q1", "q2", "q3", "q4") for p in ev.get("questions", {}).get(k, [])[:3]]
+                        if c.get("reco") else ev.get("questions", {}).get(c["key"], [])
+                    ),
+                }
+                for c in sb["observations"]["columns"]
+            ],
+        },
+        "landscape": {
+            "stats": sb["landscape"]["banner"]["stats"],
+            "platforms": sb["landscape"]["platforms"],
+            "issuers": sb["landscape"]["issuers"],
+            "callouts": [{"key": c["key"], "title": c["title"], "count": c["count"]} for c in sb["landscape"]["callouts"]],
+            "top_issuer_posts": ev.get("top_issuer_posts", []),
+            "award_posts": ev.get("award_posts", []),
+            "positive_brand_posts": ev.get("positive_brand_posts", []),
+            "positive_brand_count": sb["landscape"].get("positive_brand_posts", 0),
+            "brand_quotes": ev.get("brand_quotes", []),
+        },
+        "outlook": {
+            "stat_candidates": sb["outlook"].get("stat_candidates", []),
+            "themes": [{"key": t["key"], "title": t["title"], "pct": t["pct"], "count": t["count"], "sample_posts": ev.get("outlook", {}).get(t["key"], [])} for t in sb["outlook"]["themes"]],
+            "tagged_posts": sb["outlook"].get("tagged_posts", 0),
+        },
+    }
+
+
+_SCHEMA_NARRATIVES = {
+    "category": "str ≤ 5 words naming the product category",
+    "usage": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "summary": "str one paragraph on how the category is used and regarded",
+        "keywords": ["4-6 short phrases lifted from the summary"],
+        "groups": [{"key": "patterns|engagement|perception", "points": ["2-3 bullets, 1-2 sentences each, rich: wrap 2-4 key phrases in <mark>…</mark>; fewer bullets when sample_posts are few; none when count is 0"]}],
+    },
+    "observations": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "columns": [{"key": "q1|q2|q3|q4|reco", "q": "str: the question re-worded for this category, keep the intent", "points": ["1-2 bullets, rich allowed; empty list only when a q1-q4 column has count 0"]}],
+        "_rules": "the reco column must always carry 2-3 recommendation bullets synthesised from the other four columns' sample_posts, even though its own count is 0",
+    },
+    "landscape": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "sec_title": "str ≤ 10 words",
+        "note": "str one sentence",
+        "callouts": [{"key": "volume|award", "title": "str ≤ 8 words: for volume the most-named product or line of the top brand from top_issuer_posts, else the brand name; for award what the recognition is", "text": "str one sentence"}],
+        "goods_title": "str ≤ 10 words, e.g. '<brand> · what is going well'",
+        "goods_lead": "str one sentence",
+        "goods": [{"key": "rewards|fee|benefit|award", "title": "str ≤ 5 words", "text": "str one sentence grounded in positive_brand_posts"}],
+        "_rules": "goods: 3-5 cards only when positive_brand_count >= 3, else an empty list",
+    },
+    "outlook": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "sec_title": "str ≤ 8 words",
+        "note": "str one sentence",
+        "stats": [{"value": "value copied exactly from stat_candidates", "label": "its label, may be shortened"}],
+        "themes": [{"key": "key from facts", "title": "str ≤ 5 words, may refine the given title", "text": "str 1-2 sentences grounded in sample_posts"}],
+        "_rules": "stats: pick exactly 3 from stat_candidates",
+    },
+}
+
+_GOODS_KEYS = {"rewards", "fee", "benefit", "award"}
+
+
+def _points(items, limit: int) -> list[dict]:
+    out = []
+    for p in (items or [])[:limit]:
+        text = _rich(p.get("text") if isinstance(p, dict) else p, 300)
+        if text:
+            out.append({"text": text})   # never ext: true — no secondary-research input exists
+    return out
+
+
+def _apply_narratives(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+
+    u = raw.get("usage") or {}
+    sb["usage"]["banner"]["headline"] = _plain(u.get("headline"), 100)
+    sb["usage"]["banner"]["sub"] = _plain(u.get("sub"), 400)
+    sb["usage"]["note"] = _plain(u.get("note"), 240)
+    sb["usage"]["summary"] = _plain(u.get("summary"), 900)
+    sb["usage"]["keywords"] = [_plain(k, 60) for k in _list(u.get("keywords"), 6, 80) if _plain(k)]
+    groups = {g["key"]: g for g in sb["usage"]["groups"]}
+    for item in u.get("groups") or []:
+        if isinstance(item, dict) and item.get("key") in groups and groups[item["key"]]["count"]:
+            groups[item["key"]]["points"] = _points(item.get("points"), 3)
+
+    o = raw.get("observations") or {}
+    sb["observations"]["banner"]["headline"] = _plain(o.get("headline"), 100)
+    sb["observations"]["banner"]["sub"] = _plain(o.get("sub"), 400)
+    sb["observations"]["note"] = _plain(o.get("note"), 240)
+    cols = {c["key"]: c for c in sb["observations"]["columns"]}
+    for item in o.get("columns") or []:
+        if not isinstance(item, dict) or item.get("key") not in cols:
+            continue
+        col = cols[item["key"]]
+        if _plain(item.get("q")):
+            col["q"] = _plain(item.get("q"), 120)
+        if col.get("reco") or col.get("count"):
+            col["points"] = [p["text"] for p in _points(item.get("points"), 3)]
+
+    l = raw.get("landscape") or {}
+    sb["landscape"]["banner"]["headline"] = _plain(l.get("headline"), 100)
+    sb["landscape"]["banner"]["sub"] = _plain(l.get("sub"), 400)
+    sb["landscape"]["sec_title"] = _plain(l.get("sec_title"), 100)
+    sb["landscape"]["note"] = _plain(l.get("note"), 240)
+    callouts = {c["key"]: c for c in sb["landscape"]["callouts"]}
+    for item in l.get("callouts") or []:
+        if isinstance(item, dict) and item.get("key") in callouts:
+            if _plain(item.get("title")):
+                callouts[item["key"]]["title"] = _plain(item.get("title"), 80)
+            callouts[item["key"]]["text"] = _plain(item.get("text"), 200)
+    sb["landscape"]["callouts"] = [c for c in sb["landscape"]["callouts"] if c["title"] and c["text"]]
+    if sb["landscape"].get("positive_brand_posts", 0) >= 3:
+        sb["landscape"]["goods_title"] = _plain(l.get("goods_title"), 100)
+        sb["landscape"]["goods_lead"] = _plain(l.get("goods_lead"), 240)
+        sb["landscape"]["goods"] = [
+            {"key": g["key"], "title": _plain(g.get("title"), 48), "text": _plain(g.get("text"), 220)}
+            for g in (l.get("goods") or [])[:5]
+            if isinstance(g, dict) and g.get("key") in _GOODS_KEYS and _plain(g.get("title")) and _plain(g.get("text"))
+        ]
+
+    ok = raw.get("outlook") or {}
+    sb["outlook"]["banner"]["headline"] = _plain(ok.get("headline"), 100)
+    sb["outlook"]["banner"]["sub"] = _plain(ok.get("sub"), 400)
+    sb["outlook"]["sec_title"] = _plain(ok.get("sec_title"), 80)
+    sb["outlook"]["note"] = _plain(ok.get("note"), 240)
+    allowed = {c["value"]: c for c in sb["outlook"].get("stat_candidates", [])}
+    picked = []
+    for s in ok.get("stats") or []:
+        if isinstance(s, dict) and str(s.get("value")) in allowed and str(s.get("value")) not in {p["value"] for p in picked}:
+            picked.append({"value": str(s["value"]), "label": _plain(s.get("label"), 40) or allowed[str(s["value"])]["label"]})
+    if len(picked) == 3:
+        sb["outlook"]["banner"]["stats"] = [sb["outlook"]["banner"]["stats"][0], *picked]
+    themes = {t["key"]: t for t in sb["outlook"]["themes"]}
+    for item in ok.get("themes") or []:
+        if isinstance(item, dict) and item.get("key") in themes:
+            if _plain(item.get("title")):
+                themes[item["key"]]["title"] = _plain(item.get("title"), 48)
+            themes[item["key"]]["text"] = _plain(item.get("text"), 260)
+
+    # Internal-only fields the screen never reads.
+    sb["outlook"].pop("stat_candidates", None)
+    for g in sb["usage"]["groups"]:
+        g.pop("key", None)
+    for c in sb["observations"]["columns"]:
+        c.pop("key", None)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "dominant_narratives": (
+        _facts_narratives,
+        _SCHEMA_NARRATIVES,
+        _apply_narratives,
+        "Write the Dominant Narratives copy. British spelling, present tense, no marketing tone, no exclamation marks. "
+        "Never state a number not in FACTS. Describe only what sample_posts support; where a group or question has few or no posts, write fewer or no bullets. "
+        "Rich fields may wrap 2-4 key phrases in <mark>…</mark>; no other markup anywhere.",
+    ),
     "perception_analysis": (
         _facts_perception,
         _SCHEMA_PERCEPTION,
