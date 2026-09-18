@@ -192,26 +192,44 @@ async def ci_charts(
             return cached
         raise HTTPException(status_code=404, detail="No relevant tagged articles for this session.")
 
+    # The FE can fire two GETs for the same session on first open (page load
+    # plus a route-level fetch). Share one build per (session, lens set) so the
+    # second caller awaits the first instead of running the LLM work again.
+    key = (session_id, tuple(missing))
+    task = _inflight.get(key)
+    if task is None:
+        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, record, with_media, skip, cached, missing))
+        _inflight[key] = task
+        task.add_done_callback(lambda _t, _k=key: _inflight.pop(_k, None))
+    else:
+        logger.info("CI charts build already in flight for session_id=%s; joining", session_id)
     try:
-        started = time.time()
-        payload = await build_ci_charts(
-            workflow_nodes=nodes,
-            requested_lenses=lenses or None,
-            tagged_articles=tagged_articles,
-            brand_keywords=record.brand_keywords,
-            competitor_keywords=record.competitor_keywords,
-            with_media=with_media,
-            skip_lenses=skip,
-        )
-        response = jsonable_encoder(_merge_payload(cached, payload))
-        _save_cache(session_id, response)
-        logger.info("CI charts generated for session_id=%s (%s) in %.1fs", session_id, ",".join(missing), time.time() - started)
-        return response
+        return await asyncio.shield(task)
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Failed to generate CI charts for session_id=%s", session_id)
         raise HTTPException(status_code=500, detail=f"Failed to generate consumer intelligence charts: {exc}") from exc
+
+
+_inflight: dict[tuple, asyncio.Task] = {}
+
+
+async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, with_media, skip, cached, missing) -> dict:
+    started = time.time()
+    payload = await build_ci_charts(
+        workflow_nodes=nodes,
+        requested_lenses=lenses,
+        tagged_articles=tagged_articles,
+        brand_keywords=record.brand_keywords,
+        competitor_keywords=record.competitor_keywords,
+        with_media=with_media,
+        skip_lenses=skip,
+    )
+    response = jsonable_encoder(_merge_payload(cached, payload))
+    _save_cache(session_id, response)
+    logger.info("CI charts generated for session_id=%s (%s) in %.1fs", session_id, ",".join(missing), time.time() - started)
+    return response
 
 
 @router.websocket("/ws/consumer-intelligence/charts")
