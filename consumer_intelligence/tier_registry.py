@@ -17,6 +17,7 @@ CI_LENS_KEYS: set[str] = {
     "shifting_audience_priorities",
     "perception_analysis",
     "dominant_narratives",
+    "brand_perception",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
@@ -31,7 +32,7 @@ COMING_SOON_TIER1: set[str] = {
 # brand_intelligence also auto-includes brand_health_storyboard + brand_competitive_intel
 # (handled in builder.py, matching ConsumerIntelligence_PR/backend/app/charts/builder.py).
 TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
-    "brand_intelligence": ["brand_intelligence"],
+    "brand_intelligence": ["brand_intelligence", "brand_perception"],
     "market_intelligence": ["market_intelligence"],
     "network_map_analysis": ["network_map"],
     # Tier 2 lenses shipped so far under these pillars. The other Tier 2s
@@ -51,6 +52,7 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
 TIER2_GATE: dict[str, str] = {
     "perception_analysis": "Perception Analysis",
     "dominant_narratives": "Dominant Narratives",
+    "brand_perception": "Brand Perception",
 }
 
 

@@ -1151,8 +1151,125 @@ def _apply_narratives(sb: dict, raw: dict) -> None:
         c.pop("key", None)
 
 
+# ── brand_perception ──────────────────────────────────────────────────────
+
+
+def _facts_brand_perception(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"],
+        "competitors": meta["competitors"][:6],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "brand_tagged_posts": meta.get("brand_tagged"),
+        "perception": {
+            "stats": sb["perception"]["banner"]["stats"],
+            "popularity": sb["perception"]["popularity"],
+            "products": [
+                {"name": p["name"], "brand": p["brand"], "count": p["count"], "award_posts": p.get("award_posts", 0), "sample_posts": ev.get("products", {}).get(p["name"], []), "award_sample": ev.get("product_awards", {}).get(p["name"], [])}
+                for p in sb["perception"]["products"]
+            ],
+        },
+        "popularity": {
+            "brands": [{"name": b["name"], "pct": b["pct"], "is_brand": b.get("is_brand", False), "sample_posts": ev.get("brands", {}).get(b["name"], [])} for b in sb["popularity"]["brands"]],
+        },
+        "switching": {
+            "stats": sb["switching"]["banner"]["stats"],
+            "switching_posts": sb["switching"].get("switching_posts", 0),
+            "reasons": [{"key": r["key"], "short": r["short"], "pct": r["pct"], "count": r["count"], "sample_posts": ev.get("drivers", {}).get(r["key"], [])} for r in sb["switching"]["reasons"]],
+            "sample_posts": ev.get("switching_sample", []),
+        },
+    }
+
+
+_SCHEMA_BRAND_PERCEPTION = {
+    "category": "str ≤ 5 words naming the product category",
+    "perception": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "summary": "str one sentence: what the audience appreciates about the brands",
+        "keywords": ["4-6 short phrases lifted from the summary"],
+        "products": [{"name": "name from facts", "tags": ["2-4 short attribute tags"], "award": "str ≤ 12 words naming the recognition, ONLY when award_posts > 0 and award_sample supports it, else empty string", "text": "str 1-2 sentences, rich: wrap 2-3 key phrases in <mark>…</mark>"}],
+    },
+    "popularity": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "lead": "str one sentence, rich: 1-3 <mark> phrases",
+        "brands": [{"name": "name from facts", "points": ["1-3 bullets, 1-2 sentences each, rich: 2-3 <mark> phrases; fewer when sample_posts are few"]}],
+    },
+    "switching": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "reasons": [{"key": "key from facts", "short": "str ≤ 4 words for the chart label", "title": "str ≤ 8 words", "text": "str 1-2 sentences grounded in sample_posts"}],
+        "_rules": "when switching_posts is 0 write a sub that says so plainly",
+    },
+}
+
+
+def _apply_brand_perception(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+
+    p = raw.get("perception") or {}
+    sb["perception"]["banner"]["headline"] = _plain(p.get("headline"), 100)
+    sb["perception"]["banner"]["sub"] = _plain(p.get("sub"), 400)
+    sb["perception"]["note"] = _plain(p.get("note"), 240)
+    sb["perception"]["summary"] = _plain(p.get("summary"), 400)
+    sb["perception"]["keywords"] = [_plain(k, 60) for k in _list(p.get("keywords"), 6, 80) if _plain(k)]
+    cards = {c["name"]: c for c in sb["perception"]["products"]}
+    for item in p.get("products") or []:
+        if not isinstance(item, dict) or item.get("name") not in cards:
+            continue
+        card = cards[item["name"]]
+        card["tags"] = [_plain(t, 40) for t in _list(item.get("tags"), 4, 60) if _plain(t)]
+        card["text"] = _rich(item.get("text"), 300)
+        award = _plain(item.get("award"), 120)
+        if award and card.get("award_posts"):
+            card["award"] = award
+    for card in sb["perception"]["products"]:
+        card.pop("award_posts", None)
+        card.pop("count", None)
+
+    po = raw.get("popularity") or {}
+    sb["popularity"]["banner"]["headline"] = _plain(po.get("headline"), 100)
+    sb["popularity"]["banner"]["sub"] = _plain(po.get("sub"), 400)
+    sb["popularity"]["note"] = _plain(po.get("note"), 240)
+    sb["popularity"]["lead"] = _rich(po.get("lead"), 300)
+    rows = {b["name"]: b for b in sb["popularity"]["brands"]}
+    for item in po.get("brands") or []:
+        if isinstance(item, dict) and item.get("name") in rows:
+            rows[item["name"]]["points"] = [t for t in (_rich(x, 260) for x in _list(item.get("points"), 3, 300)) if t]
+
+    s = raw.get("switching") or {}
+    sb["switching"]["banner"]["headline"] = _plain(s.get("headline"), 100)
+    sb["switching"]["banner"]["sub"] = _plain(s.get("sub"), 400)
+    sb["switching"]["note"] = _plain(s.get("note"), 240)
+    reasons = {r["key"]: r for r in sb["switching"]["reasons"]}
+    for item in s.get("reasons") or []:
+        if isinstance(item, dict) and item.get("key") in reasons:
+            r = reasons[item["key"]]
+            if _plain(item.get("short")):
+                r["short"] = _plain(item.get("short"), 40)
+            if _plain(item.get("title")):
+                r["title"] = _plain(item.get("title"), 80)
+            r["text"] = _rich(item.get("text"), 300)
+    for r in sb["switching"]["reasons"]:
+        r.pop("count", None)
+    sb["switching"].pop("switching_posts", None)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "brand_perception": (
+        _facts_brand_perception,
+        _SCHEMA_BRAND_PERCEPTION,
+        _apply_brand_perception,
+        "Write the Brand Perception copy. British spelling, present tense, no marketing tone, no exclamation marks. "
+        "Never state a number not in FACTS. Describe only what sample_posts support; say less when a sample is thin. "
+        "Rich fields may wrap 2-3 key phrases in <mark>…</mark>; no other markup anywhere.",
+    ),
     "dominant_narratives": (
         _facts_narratives,
         _SCHEMA_NARRATIVES,

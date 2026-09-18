@@ -19,6 +19,7 @@ from .storyboard import (
     audience_priorities,
     bci,
     brand_intel,
+    brand_perception,
     dominant_narratives,
     emerging_issues,
     health,
@@ -45,6 +46,7 @@ _MODULES = {
     audience_priorities.LENS_KEY: audience_priorities,
     perception.LENS_KEY: perception,
     dominant_narratives.LENS_KEY: dominant_narratives,
+    brand_perception.LENS_KEY: brand_perception,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
@@ -54,7 +56,7 @@ _NEEDS_TAXONOMY = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY}
 # Lenses whose module exposes `async prepare(articles, brand=, known_brands=)`
 # get its result passed to build_storyboard(prepared=...). Used for per-lens
 # LLM classification (e.g. perception themes, negative emotion, narrative labels).
-_HAS_PREPARE = {perception.LENS_KEY, dominant_narratives.LENS_KEY}
+_HAS_PREPARE = {perception.LENS_KEY, dominant_narratives.LENS_KEY, brand_perception.LENS_KEY}
 
 # Build order: cheapest first so the client sees something quickly.
 _ORDER = [
@@ -68,6 +70,7 @@ _ORDER = [
     audience_priorities.LENS_KEY,
     perception.LENS_KEY,
     dominant_narratives.LENS_KEY,
+    brand_perception.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -83,10 +86,11 @@ _HERO_QUERY = {
     audience_priorities.LENS_KEY: "loyal customers audience priorities",
     perception.LENS_KEY: "consumer perception emotions",
     dominant_narratives.LENS_KEY: "conversation landscape narratives",
+    brand_perception.LENS_KEY: "brand perception shoppers",
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
-_NO_HERO_MEDIA = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY, perception.LENS_KEY, dominant_narratives.LENS_KEY}
+_NO_HERO_MEDIA = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY, perception.LENS_KEY, dominant_narratives.LENS_KEY, brand_perception.LENS_KEY}
 
 
 
