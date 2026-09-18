@@ -98,8 +98,21 @@ def _merge_payload(cached: dict | None, fresh: dict) -> dict:
     return out
 
 
+import os
+
+# Optional namespace for the S3 cache. Local dev shares the bucket with Render
+# but has its own database, so session ids collide; set CI_CACHE_SCOPE=local in
+# a dev .env to keep caches apart. Empty (the Render default) keeps today's keys.
+_CACHE_SCOPE = os.getenv("CI_CACHE_SCOPE", "").strip().strip("/")
+
+
+def _cache_prefix(session_id: int) -> str:
+    scope = f"{_CACHE_SCOPE}/" if _CACHE_SCOPE else ""
+    return f"session_files/{scope}session_{session_id}/ci_charts_data"
+
+
 def _cache_key(session_id: int) -> str:
-    return f"session_files/session_{session_id}/ci_charts_data/latest.json"
+    return f"{_cache_prefix(session_id)}/latest.json"
 
 
 def _load_cache(session_id: int) -> dict | None:
@@ -114,7 +127,7 @@ def _save_cache(session_id: int, payload: dict) -> None:
     try:
         s3_file.upload_file(_cache_key(session_id), json.dumps(payload).encode("utf-8"))
         s3_file.upload_file(
-            f"session_files/session_{session_id}/ci_charts_data/ci_charts_data_{int(time.time())}.json",
+            f"{_cache_prefix(session_id)}/ci_charts_data_{int(time.time())}.json",
             json.dumps(payload).encode("utf-8"),
         )
     except Exception:

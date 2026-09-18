@@ -15,11 +15,11 @@ CI_LENS_KEYS: set[str] = {
     "network_map",
     "track_emerging_issues",
     "shifting_audience_priorities",
+    "perception_analysis",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
 COMING_SOON_TIER1: set[str] = {
-    "landscape_analysis",
     "influencer_mapping",
     "whitespace_gap_analysis",
     "regional_intelligence",
@@ -38,10 +38,28 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     # the FE until a builder exists; add its LENS_KEY here when it does.
     "issues_intelligence": ["track_emerging_issues"],
     "advanced_metrics": ["shifting_audience_priorities"],
+    "landscape_analysis": ["perception_analysis"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],
 }
+
+# Lens keys that are only built when the workflow node's `data.tier2[]` names
+# the Tier 2 label. Lenses not listed here follow the Brand Intelligence
+# behaviour: every registered lens under a selected Tier 1 is built.
+TIER2_GATE: dict[str, str] = {
+    "perception_analysis": "Perception Analysis",
+}
+
+
+def _tier2_allows(lens_key: str, node_data: dict) -> bool:
+    label = TIER2_GATE.get(lens_key)
+    if not label:
+        return True
+    selected = node_data.get("tier2") or []
+    if not isinstance(selected, list):
+        return False
+    return any(str(s).strip().lower() == label.lower() for s in selected)
 
 
 def resolve_ci_lenses(workflow_nodes: list[dict]) -> tuple[list[str], list[str]]:
@@ -70,7 +88,7 @@ def resolve_ci_lenses(workflow_nodes: list[dict]) -> tuple[list[str], list[str]]
             if lens in COMING_SOON_TIER1:
                 coming_soon.add(lens)
             else:
-                keys = TIER1_TO_LENS_KEYS.get(lens, [])
+                keys = [k for k in TIER1_TO_LENS_KEYS.get(lens, []) if _tier2_allows(k, data)]
                 lens_keys.update(keys)
         elif lens in CI_LENS_KEYS:
             lens_keys.add(lens)

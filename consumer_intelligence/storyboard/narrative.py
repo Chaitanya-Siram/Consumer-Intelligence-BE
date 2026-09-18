@@ -12,6 +12,7 @@ with prose fields still empty so the numbers always ship.
 import asyncio
 import json
 import logging
+import re
 
 from ..narrative_client import get_narrative_client
 
@@ -844,8 +845,146 @@ def _apply_priorities(sb: dict, raw: dict) -> None:
     sb["monthly"]["text"] = _s(raw.get("monthly_text"), 300)
 
 
+# ── perception_analysis ───────────────────────────────────────────────────
+
+_MARK_OK = re.compile(r"<(?!/?mark>)[^>]*>")   # strip every tag except <mark>…</mark>
+
+
+def _rich(value, limit: int = 600) -> str:
+    """Like _s but keeps <mark> highlights (contract: no other markup)."""
+    text = _MARK_OK.sub("", str(value or "")).strip()
+    return text[:limit]
+
+
+_ANY_TAG = re.compile(r"<[^>]+>")
+
+
+def _plain(value, limit: int = 600) -> str:
+    """For fields the contract marks plain: drop every tag, <mark> included,
+    since those screens render the string as text and would show the tags."""
+    return _s(_ANY_TAG.sub("", str(value or "")), limit)
+
+
+def _facts_perception(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"],
+        "competitors": meta["competitors"][:6],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "rated_mentions": meta["rated_mentions"],
+        "perception": {
+            "stats": sb["perception"]["banner"]["stats"],
+            "themes": [{"key": t["key"], "title": t["title"], "pct": t["pct"], "count": t["count"], "brands": t.get("brands", []), "sample_posts": ev.get("themes", {}).get(t["key"], [])} for t in sb["perception"]["themes"]],
+            "unclassified": meta.get("classification", {}).get("unclassified"),
+        },
+        "sentiment": {
+            "stats": sb["sentiment"]["banner"]["stats"],
+            "split": sb["sentiment"]["split"],
+            "groups": [{"tone": g["tone"], "label": g["label"], "pct": g["pct"], "count": g["count"], "drivers": [{"raw_theme": d["raw_theme"], "count": d["count"], "brands": d.get("brands", []), "sample_posts": ev.get("drivers", {}).get(f"{g['tone']}:{d['raw_theme']}", [])} for d in g["drivers"]]} for g in sb["sentiment"]["groups"]],
+            "quotes": sb["sentiment"]["quotes"],
+        },
+        "emotion": {
+            "stats": sb["emotion"]["banner"]["stats"],
+            "mix": sb["emotion"]["mix"],
+            "aspects": [{"key": a["key"], "title": a["title"], "pct": a["pct"], "count": a["count"], "sample_posts": ev.get("aspects", {}).get(a["key"], [])} for a in sb["emotion"]["aspects"]],
+            "negative_reasons": ev.get("negative_reasons", []),
+        },
+    }
+
+
+_SCHEMA_PERCEPTION = {
+    "category": "str ≤ 5 words naming the product category",
+    "perception": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence describing the section",
+        "summary": "str one paragraph: the overall read of how the audience perceives the category and brand",
+        "keywords": ["4-6 short phrases lifted from the summary"],
+        "themes": [{"key": "key from facts", "title": "str: keep or re-word for this category, ≤ 4 words", "text": "str 1-3 sentences, rich: wrap 2-4 key phrases in <mark>…</mark>; say less when sample_posts are few; empty string when count is 0"}],
+    },
+    "sentiment": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "groups": [{"tone": "pos|neu|neg", "drivers": [{"raw_theme": "raw_theme from facts", "title": "str ≤ 4 words", "text": "str one sentence, rich allowed"}]}],
+    },
+    "emotion": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "note": "str one sentence",
+        "summary": "str one paragraph grounded in mix and aspects; if negatives are near zero, say so plainly",
+        "lead": "str one sentence, rich: 1-3 <mark> phrases",
+        "aspects": [{"key": "key from facts", "title": "str ≤ 4 words", "text": "str 1-2 sentences; empty string when count is 0"}],
+    },
+}
+
+
+def _apply_perception(sb: dict, raw: dict) -> None:
+    # Contract §3: only fields marked rich may carry <mark>; everything else is
+    # rendered as plain text by the screen, so tags are stripped here.
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+
+    p = raw.get("perception") or {}
+    sb["perception"]["banner"]["headline"] = _plain(p.get("headline"), 100)
+    sb["perception"]["banner"]["sub"] = _plain(p.get("sub"), 400)
+    sb["perception"]["note"] = _plain(p.get("note"), 240)
+    sb["perception"]["summary"] = _plain(p.get("summary"), 900)
+    sb["perception"]["keywords"] = [_plain(k, 60) for k in _list(p.get("keywords"), 6, 80) if _plain(k)]
+    by_key = {t["key"]: t for t in sb["perception"]["themes"]}
+    for item in p.get("themes") or []:
+        if isinstance(item, dict) and item.get("key") in by_key:
+            card = by_key[item["key"]]
+            if _plain(item.get("title")):
+                card["title"] = _plain(item.get("title"), 48)
+            card["text"] = _rich(item.get("text"), 420) if card["count"] else ""
+
+    s = raw.get("sentiment") or {}
+    sb["sentiment"]["banner"]["headline"] = _plain(s.get("headline"), 100)
+    sb["sentiment"]["banner"]["sub"] = _plain(s.get("sub"), 400)
+    sb["sentiment"]["note"] = _plain(s.get("note"), 240)
+    groups = {g["tone"]: g for g in sb["sentiment"]["groups"]}
+    for item in s.get("groups") or []:
+        if not isinstance(item, dict) or item.get("tone") not in groups:
+            continue
+        drivers = {d["raw_theme"]: d for d in groups[item["tone"]]["drivers"]}
+        for d in item.get("drivers") or []:
+            if isinstance(d, dict) and d.get("raw_theme") in drivers:
+                target = drivers[d["raw_theme"]]
+                if _plain(d.get("title")):
+                    target["title"] = _plain(d.get("title"), 48)
+                target["text"] = _rich(d.get("text"), 300)
+
+    e = raw.get("emotion") or {}
+    sb["emotion"]["banner"]["headline"] = _plain(e.get("headline"), 100)
+    sb["emotion"]["banner"]["sub"] = _plain(e.get("sub"), 400)
+    sb["emotion"]["note"] = _plain(e.get("note"), 240)
+    sb["emotion"]["summary"] = _plain(e.get("summary"), 900)
+    sb["emotion"]["lead"] = _rich(e.get("lead"), 300)
+    aspects = {a["key"]: a for a in sb["emotion"]["aspects"]}
+    for item in e.get("aspects") or []:
+        if isinstance(item, dict) and item.get("key") in aspects:
+            card = aspects[item["key"]]
+            if _plain(item.get("title")):
+                card["title"] = _plain(item.get("title"), 48)
+            card["text"] = _rich(item.get("text"), 300) if card["count"] else ""
+
+    # Drop internal-only fields the screen never reads.
+    for g in sb["sentiment"]["groups"]:
+        for d in g["drivers"]:
+            d.pop("raw_theme", None)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "perception_analysis": (
+        _facts_perception,
+        _SCHEMA_PERCEPTION,
+        _apply_perception,
+        "Write the Perception Analysis copy. British spelling, present tense, no marketing tone, no exclamation marks. "
+        "Never state a number not in FACTS. Describe only what sample_posts support; when a card has few or no posts, say less or leave its text empty. "
+        "Where a field says rich, wrap 2-4 key phrases in <mark>…</mark> and use no other markup.",
+    ),
     "track_emerging_issues": (_facts_issues, _SCHEMA_ISSUES, _apply_issues, "Write the Track Emerging Issues storyboard copy. The issue is facts.issue.group; name it plainly, describe the audience journey around it, and ground every claim in the numbers and quotes given."),
     "shifting_audience_priorities": (_facts_priorities, _SCHEMA_PRIORITIES, _apply_priorities, "Write the Shifting Audience Priorities (brand loyalty index) copy. Explain the index in this category's terms and label each spike from its evidence."),
     "brand_competitive_intel": (_facts_bci, _SCHEMA_BCI, _apply_bci, "Write the Brand & Competitive Intelligence copy."),
