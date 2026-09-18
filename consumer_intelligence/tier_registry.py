@@ -22,12 +22,14 @@ CI_LENS_KEYS: set[str] = {
     "brand_messaging",
     "brand_performance",
     "user_behaviour",
+    "regional_sentiment",
+    "regional_engagement",
+    "regional_brand_perception",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
 COMING_SOON_TIER1: set[str] = {
     "influencer_mapping",
-    "regional_intelligence",
     "crisis_solutioning",
 }
 
@@ -48,6 +50,7 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     # New Tier 1 pillar (FE: "Consumer Segmentation Analysis"); this is the only
     # place the backend enumerates Tier 1 keys, so adding it here is the whole change.
     "consumer_segmentation": ["user_behaviour"],
+    "regional_intelligence": ["regional_sentiment", "regional_engagement", "regional_brand_perception"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],
@@ -64,6 +67,9 @@ TIER2_GATE: dict[str, str] = {
     "brand_messaging": "Brand Messaging",
     "brand_performance": "Brand Performance",
     "user_behaviour": "User Behaviour Analysis",
+    "regional_sentiment": "State-Level Sentiment",
+    "regional_engagement": "Engagement",
+    "regional_brand_perception": "Brand Perception",
 }
 
 

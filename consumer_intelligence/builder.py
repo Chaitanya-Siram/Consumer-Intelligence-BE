@@ -29,6 +29,9 @@ from .storyboard import (
     market_intel,
     network_map,
     perception,
+    regional_brand_perception,
+    regional_engagement,
+    regional_sentiment,
     trend,
     user_behaviour,
 )
@@ -55,6 +58,9 @@ _MODULES = {
     brand_messaging.LENS_KEY: brand_messaging,
     brand_performance.LENS_KEY: brand_performance,
     user_behaviour.LENS_KEY: user_behaviour,
+    regional_sentiment.LENS_KEY: regional_sentiment,
+    regional_engagement.LENS_KEY: regional_engagement,
+    regional_brand_perception.LENS_KEY: regional_brand_perception,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
@@ -74,6 +80,9 @@ _HAS_PREPARE = {
     brand_messaging.LENS_KEY,
     brand_performance.LENS_KEY,
     user_behaviour.LENS_KEY,
+    regional_sentiment.LENS_KEY,
+    regional_engagement.LENS_KEY,
+    regional_brand_perception.LENS_KEY,
 }
 
 # Build order: cheapest first so the client sees something quickly.
@@ -93,6 +102,9 @@ _ORDER = [
     audience_expectation.LENS_KEY,
     brand_messaging.LENS_KEY,
     user_behaviour.LENS_KEY,
+    regional_sentiment.LENS_KEY,
+    regional_engagement.LENS_KEY,
+    regional_brand_perception.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -113,6 +125,9 @@ _HERO_QUERY = {
     brand_messaging.LENS_KEY: "brand campaign messaging",
     brand_performance.LENS_KEY: "brand performance comparison",
     user_behaviour.LENS_KEY: "consumer segments behaviour",
+    regional_sentiment.LENS_KEY: "world map regions sentiment",
+    regional_engagement.LENS_KEY: "regional market products",
+    regional_brand_perception.LENS_KEY: "regional brands map",
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
@@ -126,6 +141,9 @@ _NO_HERO_MEDIA = {
     brand_messaging.LENS_KEY,
     brand_performance.LENS_KEY,
     user_behaviour.LENS_KEY,
+    regional_sentiment.LENS_KEY,
+    regional_engagement.LENS_KEY,
+    regional_brand_perception.LENS_KEY,
 }
 
 

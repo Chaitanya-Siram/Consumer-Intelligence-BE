@@ -1498,8 +1498,91 @@ def _apply_behaviour(sb: dict, raw: dict) -> None:
     sb["multi"].pop("multi_posts", None)
 
 
+# ── regional intelligence (three lenses, one shape) ──────────────────────
+
+
+def _region_facts(sb: dict, fields: tuple[str, ...]) -> dict:
+    ev = sb.get("evidence", {})
+    out = []
+    for r in sb["regions"]:
+        rec = {k: r.get(k) for k in ("key", "name", "mentions", *fields) if r.get(k) is not None}
+        e = ev.get(r["key"], {})
+        rec["sample_posts"] = e.get("sample", [])
+        if "sentiment" in fields:
+            rec["positive_sample"], rec["negative_sample"] = e.get("positive", []), e.get("negative", [])
+        if "types_h1" in fields:
+            rec["h1_sample"], rec["h2_sample"] = e.get("h1_sample", []), e.get("h2_sample", [])
+        if "topics" in fields:
+            rec["brand_posts"] = e.get("brands", {})
+        out.append(rec)
+    return {"brand": sb["meta"]["brand"], "competitors": sb["meta"]["competitors"][:6], "window": sb["meta"]["window"], "total_mentions": sb["meta"]["total_mentions"], "periods": sb.get("periods"), "regions": out}
+
+
+def _facts_regional_sentiment(sb: dict) -> dict:
+    return _region_facts(sb, ("sentiment", "themes"))
+
+
+def _facts_regional_engagement(sb: dict) -> dict:
+    return _region_facts(sb, ("types_h1", "types_h2", "topics"))
+
+
+def _facts_regional_brands(sb: dict) -> dict:
+    return _region_facts(sb, ("brands", "others", "topics"))
+
+
+_REGION_COMMON = {"key": "key from facts", "headline": "str ≤ 12 words for this market", "summary": "str 2-4 sentences: the market read, using only this market's numbers and sample_posts"}
+_SCHEMA_REGIONAL_SENTIMENT = {"category": "str ≤ 5 words naming the product category", "note": "str one sentence describing the view", "regions": [{**_REGION_COMMON, "insights": ["2-4 bullets, rich, grounded in sentiment, themes and samples"]}]}
+_SCHEMA_REGIONAL_ENGAGEMENT = {"category": "str ≤ 5 words naming the product category (not the dashboard)", "note": "str one sentence", "regions": [{**_REGION_COMMON, "insights": ["2-4 bullets, rich; at least one names the largest movement between types_h1 and types_h2 by product-type name"], "topics": [{"brand": "brand from facts.regions[].topics", "text": "str 1-2 sentences, rich, grounded in brand_posts"}]}]}
+_SCHEMA_REGIONAL_BRANDS = {"category": "str ≤ 5 words naming the product category (not the dashboard)", "note": "str one sentence", "regions": [{**_REGION_COMMON, "topics": [{"brand": "brand from facts.regions[].topics", "text": "str 1-2 sentences, rich, grounded in brand_posts"}]}]}
+
+
+def _apply_regional(sb: dict, raw: dict, *, insights: bool, topics: bool) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+    sb["note"] = _plain(raw.get("note"), 240)
+    by_key = {r["key"]: r for r in sb["regions"]}
+    for item in raw.get("regions") or []:
+        if not isinstance(item, dict) or item.get("key") not in by_key:
+            continue
+        r = by_key[item["key"]]
+        r["headline"] = _plain(item.get("headline"), 120)
+        r["summary"] = _plain(item.get("summary"), 700)
+        if insights:
+            r["insights"] = [t for t in (_rich(x, 260) for x in _list(item.get("insights"), 4, 300)) if t]
+        if topics and r.get("topics"):
+            by_brand = {t["brand"]: t for t in r["topics"]}
+            for t in item.get("topics") or []:
+                if isinstance(t, dict) and t.get("brand") in by_brand:
+                    by_brand[t["brand"]]["text"] = _rich(t.get("text"), 300)
+            r["topics"] = [t for t in r["topics"] if t.get("text")]
+    for r in sb["regions"]:
+        if insights and not r.get("insights"):
+            r.pop("insights", None)
+        if topics and not r.get("topics"):
+            r.pop("topics", None)
+
+
+def _apply_regional_sentiment(sb: dict, raw: dict) -> None:
+    _apply_regional(sb, raw, insights=True, topics=False)
+
+
+def _apply_regional_engagement(sb: dict, raw: dict) -> None:
+    _apply_regional(sb, raw, insights=True, topics=True)
+
+
+def _apply_regional_brands(sb: dict, raw: dict) -> None:
+    _apply_regional(sb, raw, insights=False, topics=True)
+
+
+_REGIONAL_RULES = (
+    "Write for each market using only that market's numbers and sample posts. " + _WG_RULES
+)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "regional_sentiment": (_facts_regional_sentiment, _SCHEMA_REGIONAL_SENTIMENT, _apply_regional_sentiment, "Write the State-Level Sentiment copy, one block per market. " + _REGIONAL_RULES),
+    "regional_engagement": (_facts_regional_engagement, _SCHEMA_REGIONAL_ENGAGEMENT, _apply_regional_engagement, "Write the Regional Engagement copy, one block per market. " + _REGIONAL_RULES),
+    "regional_brand_perception": (_facts_regional_brands, _SCHEMA_REGIONAL_BRANDS, _apply_regional_brands, "Write the Regional Brand Perception copy, one block per market. " + _REGIONAL_RULES),
     "user_behaviour": (_facts_behaviour, _SCHEMA_BEHAVIOUR, _apply_behaviour, "Write the User Behaviour Analysis copy. " + _WG_RULES),
     "audience_expectation": (_facts_expectation, _SCHEMA_EXPECTATION, _apply_expectation, "Write the Audience Expectation copy. " + _WG_RULES),
     "brand_messaging": (_facts_messaging, _SCHEMA_MESSAGING, _apply_messaging, "Write the Brand Messaging copy, one block per brand. " + _WG_RULES),
