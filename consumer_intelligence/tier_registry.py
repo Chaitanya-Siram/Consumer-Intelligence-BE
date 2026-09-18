@@ -18,12 +18,14 @@ CI_LENS_KEYS: set[str] = {
     "perception_analysis",
     "dominant_narratives",
     "brand_perception",
+    "audience_expectation",
+    "brand_messaging",
+    "brand_performance",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
 COMING_SOON_TIER1: set[str] = {
     "influencer_mapping",
-    "whitespace_gap_analysis",
     "regional_intelligence",
     "crisis_solutioning",
 }
@@ -41,6 +43,7 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     "issues_intelligence": ["track_emerging_issues"],
     "advanced_metrics": ["shifting_audience_priorities"],
     "landscape_analysis": ["perception_analysis", "dominant_narratives"],
+    "whitespace_gap_analysis": ["audience_expectation", "brand_messaging", "brand_performance"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],
@@ -53,6 +56,9 @@ TIER2_GATE: dict[str, str] = {
     "perception_analysis": "Perception Analysis",
     "dominant_narratives": "Dominant Narratives",
     "brand_perception": "Brand Perception",
+    "audience_expectation": "Audience Expectation",
+    "brand_messaging": "Brand Messaging",
+    "brand_performance": "Brand Performance",
 }
 
 

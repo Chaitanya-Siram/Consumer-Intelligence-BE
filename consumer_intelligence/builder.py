@@ -16,10 +16,13 @@ from typing import Any, Awaitable, Callable
 
 from . import brand_media, taxonomy
 from .storyboard import (
+    audience_expectation,
     audience_priorities,
     bci,
     brand_intel,
+    brand_messaging,
     brand_perception,
+    brand_performance,
     dominant_narratives,
     emerging_issues,
     health,
@@ -47,6 +50,9 @@ _MODULES = {
     perception.LENS_KEY: perception,
     dominant_narratives.LENS_KEY: dominant_narratives,
     brand_perception.LENS_KEY: brand_perception,
+    audience_expectation.LENS_KEY: audience_expectation,
+    brand_messaging.LENS_KEY: brand_messaging,
+    brand_performance.LENS_KEY: brand_performance,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
@@ -56,7 +62,16 @@ _NEEDS_TAXONOMY = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY}
 # Lenses whose module exposes `async prepare(articles, brand=, known_brands=)`
 # get its result passed to build_storyboard(prepared=...). Used for per-lens
 # LLM classification (e.g. perception themes, negative emotion, narrative labels).
-_HAS_PREPARE = {perception.LENS_KEY, dominant_narratives.LENS_KEY, brand_perception.LENS_KEY}
+# Modules that declare the same PREPARE_KEY share one prepare() result per build
+# (the three Whitespace & Gap lenses label every post once, not three times).
+_HAS_PREPARE = {
+    perception.LENS_KEY,
+    dominant_narratives.LENS_KEY,
+    brand_perception.LENS_KEY,
+    audience_expectation.LENS_KEY,
+    brand_messaging.LENS_KEY,
+    brand_performance.LENS_KEY,
+}
 
 # Build order: cheapest first so the client sees something quickly.
 _ORDER = [
@@ -71,6 +86,9 @@ _ORDER = [
     perception.LENS_KEY,
     dominant_narratives.LENS_KEY,
     brand_perception.LENS_KEY,
+    brand_performance.LENS_KEY,
+    audience_expectation.LENS_KEY,
+    brand_messaging.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -87,10 +105,22 @@ _HERO_QUERY = {
     perception.LENS_KEY: "consumer perception emotions",
     dominant_narratives.LENS_KEY: "conversation landscape narratives",
     brand_perception.LENS_KEY: "brand perception shoppers",
+    audience_expectation.LENS_KEY: "audience expectations gap",
+    brand_messaging.LENS_KEY: "brand campaign messaging",
+    brand_performance.LENS_KEY: "brand performance comparison",
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
-_NO_HERO_MEDIA = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY, perception.LENS_KEY, dominant_narratives.LENS_KEY, brand_perception.LENS_KEY}
+_NO_HERO_MEDIA = {
+    emerging_issues.LENS_KEY,
+    audience_priorities.LENS_KEY,
+    perception.LENS_KEY,
+    dominant_narratives.LENS_KEY,
+    brand_perception.LENS_KEY,
+    audience_expectation.LENS_KEY,
+    brand_messaging.LENS_KEY,
+    brand_performance.LENS_KEY,
+}
 
 
 
@@ -138,6 +168,7 @@ async def _build_one(
     *,
     with_media: bool,
     theme_taxonomy: dict | None = None,
+    prepared_cache: dict[str, dict] | None = None,
 ) -> dict:
     module = _MODULES[lens_key]
     started = time.time()
@@ -147,12 +178,18 @@ async def _build_one(
     if lens_key == audience_priorities.LENS_KEY:
         kwargs["taxonomy_groups"] = theme_taxonomy or {}
     if lens_key in _HAS_PREPARE:
-        await _emit(on_event, {"type": "progress", "stage": "classify", "lens": lens_key, "message": f"Classifying posts for {lens_key}…"})
-        try:
-            kwargs["prepared"] = await module.prepare(articles, brand=brand, known_brands=known_brands)
-        except Exception as exc:  # classifiers have their own fallbacks; this is belt and braces
-            logger.warning("CI prepare failed for %s: %s", lens_key, exc)
-            kwargs["prepared"] = {}
+        cache_key = getattr(module, "PREPARE_KEY", lens_key)
+        if prepared_cache is not None and cache_key in prepared_cache:
+            kwargs["prepared"] = prepared_cache[cache_key]
+        else:
+            await _emit(on_event, {"type": "progress", "stage": "classify", "lens": lens_key, "message": f"Classifying posts for {lens_key}…"})
+            try:
+                kwargs["prepared"] = await module.prepare(articles, brand=brand, known_brands=known_brands)
+            except Exception as exc:  # classifiers have their own fallbacks; this is belt and braces
+                logger.warning("CI prepare failed for %s: %s", lens_key, exc)
+                kwargs["prepared"] = {}
+            if prepared_cache is not None:
+                prepared_cache[cache_key] = kwargs["prepared"]
     storyboard = await asyncio.to_thread(module.build_storyboard, articles, **kwargs)
     if lens_key in _NEEDS_TAXONOMY and theme_taxonomy is not None:
         storyboard.setdefault("meta", {})["taxonomy"] = taxonomy.summary(theme_taxonomy)
@@ -223,10 +260,11 @@ async def build_ci_charts(
         logger.info("CI taxonomy: %s groups via %s from %s raw themes", len(theme_taxonomy.get("groups", [])), theme_taxonomy.get("method"), theme_taxonomy.get("raw_distinct"))
 
     out: dict[str, Any] = {}
+    prepared_cache: dict[str, dict] = {}
     started = time.time()
     for lens_key in to_build:
         try:
-            out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media, theme_taxonomy=theme_taxonomy)
+            out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media, theme_taxonomy=theme_taxonomy, prepared_cache=prepared_cache)
             await _emit(on_event, {"type": "lens_complete", "lens": lens_key, "storyboard": out[lens_key]})
         except Exception as exc:
             logger.exception("CI lens %s failed", lens_key)

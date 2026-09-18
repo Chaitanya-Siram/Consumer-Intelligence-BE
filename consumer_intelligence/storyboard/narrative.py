@@ -1260,8 +1260,174 @@ def _apply_brand_perception(sb: dict, raw: dict) -> None:
     sb["switching"].pop("switching_posts", None)
 
 
+# ── whitespace & gap: audience_expectation ───────────────────────────────
+
+_WG_RULES = (
+    "British spelling, present tense, no marketing tone, no exclamation marks. Never state a number not in FACTS. "
+    "Describe only what sample_posts support; where a card has few or no posts write fewer or no bullets. "
+    "Rich fields may wrap 2-4 key phrases in <mark>…</mark>; no other markup anywhere."
+)
+
+
+def _facts_expectation(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"], "competitors": meta["competitors"][:6], "window": meta["window"], "total_mentions": meta["total_mentions"],
+        "needs": {
+            "stats": sb["needs"]["banner"]["stats"],
+            "attributes": [{"key": a["key"], "name": a["name"], "pct": a["pct"], "count": a["count"], "sample_posts": ev.get("attributes", {}).get(a["key"], [])} for a in sb["needs"]["attributes"]],
+            "usage_posts": sb["needs"].get("usage_posts", 0),
+            "usage_sample": ev.get("usage", []),
+        },
+        "unmet": {"stats": sb["unmet"]["banner"]["stats"], "needs": [{"key": n["key"], "title": n["title"], "pct": n.get("pct"), "count": n["count"], "sample_posts": ev.get("unmet", {}).get(n["key"], [])} for n in sb["unmet"]["needs"]]},
+        "digital": {"pillars": [{"key": p["key"], "title": p["title"], "pct": p["pct"], "count": p["count"], "quote": p.get("quote"), "sample_posts": ev.get("pillars", {}).get(p["key"], [])} for p in sb["digital"]["pillars"]], "digital_posts": sb["digital"].get("digital_posts", 0)},
+    }
+
+
+_SCHEMA_EXPECTATION = {
+    "category": "str ≤ 5 words naming the product category",
+    "needs": {
+        "headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence",
+        "attributes": [{"key": "key from facts", "name": "str ≤ 5 words: keep or re-word the attribute for this category", "points": ["1-3 bullets, rich"]}],
+        "drivers_title": "str ≤ 8 words, e.g. 'Key drivers to use <category>'", "drivers_lead": "str one sentence",
+        "drivers": ["4-6 bullets on why people use the product, rich, grounded in usage_sample; empty list when usage_posts < 3"],
+    },
+    "unmet": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence", "needs": [{"key": "key from facts", "title": "str ≤ 8 words, may refine", "text": "str 1-2 sentences, rich"}]},
+    "digital": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences; when digital_posts is 0 say plainly that digital complaints are absent", "note": "str one sentence", "pillars": [{"key": "key from facts", "title": "str ≤ 4 words, may refine", "text": "str 1-2 sentences, rich"}]},
+}
+
+
+def _apply_expectation(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+    n = raw.get("needs") or {}
+    sb["needs"]["banner"]["headline"] = _plain(n.get("headline"), 120)
+    sb["needs"]["banner"]["sub"] = _plain(n.get("sub"), 400)
+    sb["needs"]["note"] = _plain(n.get("note"), 240)
+    attrs = {a["key"]: a for a in sb["needs"]["attributes"]}
+    for item in n.get("attributes") or []:
+        if isinstance(item, dict) and item.get("key") in attrs:
+            a = attrs[item["key"]]
+            if _plain(item.get("name")):
+                a["name"] = _plain(item.get("name"), 48)
+            a["points"] = [t for t in (_rich(x, 260) for x in _list(item.get("points"), 3, 300)) if t]
+    if sb["needs"].get("usage_posts", 0) >= 3:
+        sb["needs"]["drivers_title"] = _plain(n.get("drivers_title"), 80)
+        sb["needs"]["drivers_lead"] = _plain(n.get("drivers_lead"), 240)
+        sb["needs"]["drivers"] = [t for t in (_rich(x, 260) for x in _list(n.get("drivers"), 6, 300)) if t]
+    u = raw.get("unmet") or {}
+    sb["unmet"]["banner"]["headline"] = _plain(u.get("headline"), 120)
+    sb["unmet"]["banner"]["sub"] = _plain(u.get("sub"), 400)
+    sb["unmet"]["note"] = _plain(u.get("note"), 240)
+    cards = {c["key"]: c for c in sb["unmet"]["needs"]}
+    for item in u.get("needs") or []:
+        if isinstance(item, dict) and item.get("key") in cards:
+            if _plain(item.get("title")):
+                cards[item["key"]]["title"] = _plain(item.get("title"), 80)
+            cards[item["key"]]["text"] = _rich(item.get("text"), 300)
+    d = raw.get("digital") or {}
+    sb["digital"]["banner"]["headline"] = _plain(d.get("headline"), 120)
+    sb["digital"]["banner"]["sub"] = _plain(d.get("sub"), 400)
+    sb["digital"]["note"] = _plain(d.get("note"), 240)
+    pillars = {p["key"]: p for p in sb["digital"]["pillars"]}
+    for item in d.get("pillars") or []:
+        if isinstance(item, dict) and item.get("key") in pillars:
+            if _plain(item.get("title")):
+                pillars[item["key"]]["title"] = _plain(item.get("title"), 48)
+            pillars[item["key"]]["text"] = _rich(item.get("text"), 300)
+    for coll, key in ((sb["needs"]["attributes"], "count"), (sb["unmet"]["needs"], "count"), (sb["digital"]["pillars"], "count")):
+        for c in coll:
+            c.pop(key, None)
+    sb["needs"].pop("usage_posts", None)
+    sb["digital"].pop("digital_posts", None)
+
+
+# ── whitespace & gap: brand_messaging ────────────────────────────────────
+
+
+def _facts_messaging(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"], "competitors": meta["competitors"][:6], "window": meta["window"], "initiative_posts": meta.get("initiative_posts"),
+        "brands": [{"name": b["name"], "is_brand": b["is_brand"], "mentions": b["mentions"], "initiatives": [{"key": i["key"], "title": i["title"], "pct": i["pct"], "count": i["count"], "sample_posts": ev.get(b["name"], {}).get(i["key"], [])} for i in b["initiatives"]]} for b in sb["brands"]],
+    }
+
+
+_SCHEMA_MESSAGING = {
+    "category": "str ≤ 5 words naming the product category",
+    "note": "str one sentence describing what this view shows",
+    "brands": [{"name": "name from facts", "headline": "str ≤ 12 words on what this brand talks about", "sub": "str 1-2 sentences", "initiatives": [{"key": "key from facts", "title": "str ≤ 5 words, may refine", "points": ["1-3 bullets, rich, grounded in sample_posts"]}]}],
+}
+
+
+def _apply_messaging(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+    sb["note"] = _plain(raw.get("note"), 240)
+    brands = {b["name"]: b for b in sb["brands"]}
+    for item in raw.get("brands") or []:
+        if not isinstance(item, dict) or item.get("name") not in brands:
+            continue
+        b = brands[item["name"]]
+        b["headline"] = _plain(item.get("headline"), 120)
+        b["sub"] = _plain(item.get("sub"), 400)
+        inits = {i["key"]: i for i in b["initiatives"]}
+        for it in item.get("initiatives") or []:
+            if isinstance(it, dict) and it.get("key") in inits:
+                if _plain(it.get("title")):
+                    inits[it["key"]]["title"] = _plain(it.get("title"), 60)
+                inits[it["key"]]["points"] = [t for t in (_rich(x, 260) for x in _list(it.get("points"), 3, 300)) if t]
+    for b in sb["brands"]:
+        for i in b["initiatives"]:
+            i.pop("count", None)
+            i.pop("key", None)
+
+
+# ── whitespace & gap: brand_performance ──────────────────────────────────
+
+
+def _facts_performance(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"], "competitors": meta["competitors"][:6], "window": meta["window"], "total_mentions": meta["total_mentions"],
+        "voice": {"stats": sb["voice"]["banner"]["stats"], "share": sb["voice"]["share"], "sentiment": sb["voice"]["sentiment"], "best_competitor": sb["voice"].get("best_competitor"), "brand_posts_sample": {k: v[:4] for k, v in ev.get("brand_posts", {}).items()}},
+        "digital": {"stats": sb["digital"]["banner"]["stats"], "brands": [{"name": b["name"], "is_brand": b["is_brand"], "posts": b["posts"], "themes": b["themes"], "positive_sample": ev.get("digital", {}).get(b["name"], {}).get("positive", []), "negative_sample": ev.get("digital", {}).get(b["name"], {}).get("negative", []), "sample_posts": ev.get("digital", {}).get(b["name"], {}).get("all", [])} for b in sb["digital"]["brands"]]},
+    }
+
+
+_SCHEMA_PERFORMANCE = {
+    "category": "str ≤ 5 words naming the product category",
+    "voice": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence", "callout": "str one sentence on the gap between the project brand and best_competitor, using only numbers in FACTS"},
+    "digital": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences; when no brand has digital posts say so plainly", "note": "str one sentence",
+                "brands": [{"name": "name from facts", "working": ["2-5 bullets, rich, from positive_sample; empty when positive_sample is empty"], "not_working": ["1-4 bullets, rich, from negative_sample; empty when negative_sample is empty"]}]},
+}
+
+
+def _apply_performance(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+    v = raw.get("voice") or {}
+    sb["voice"]["banner"]["headline"] = _plain(v.get("headline"), 120)
+    sb["voice"]["banner"]["sub"] = _plain(v.get("sub"), 400)
+    sb["voice"]["note"] = _plain(v.get("note"), 240)
+    sb["voice"]["callout"] = _plain(v.get("callout"), 300)
+    sb["voice"].pop("best_competitor", None)
+    d = raw.get("digital") or {}
+    sb["digital"]["banner"]["headline"] = _plain(d.get("headline"), 120)
+    sb["digital"]["banner"]["sub"] = _plain(d.get("sub"), 400)
+    sb["digital"]["note"] = _plain(d.get("note"), 240)
+    brands = {b["name"]: b for b in sb["digital"]["brands"]}
+    for item in d.get("brands") or []:
+        if isinstance(item, dict) and item.get("name") in brands:
+            b = brands[item["name"]]
+            b["working"] = [t for t in (_rich(x, 260) for x in _list(item.get("working"), 5, 300)) if t]
+            b["not_working"] = [t for t in (_rich(x, 260) for x in _list(item.get("not_working"), 4, 300)) if t]
+    for b in sb["digital"]["brands"]:
+        b.pop("posts", None)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "audience_expectation": (_facts_expectation, _SCHEMA_EXPECTATION, _apply_expectation, "Write the Audience Expectation copy. " + _WG_RULES),
+    "brand_messaging": (_facts_messaging, _SCHEMA_MESSAGING, _apply_messaging, "Write the Brand Messaging copy, one block per brand. " + _WG_RULES),
+    "brand_performance": (_facts_performance, _SCHEMA_PERFORMANCE, _apply_performance, "Write the Brand Performance copy. " + _WG_RULES),
     "brand_perception": (
         _facts_brand_perception,
         _SCHEMA_BRAND_PERCEPTION,
