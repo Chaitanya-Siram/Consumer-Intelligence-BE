@@ -21,6 +21,7 @@ CI_LENS_KEYS: set[str] = {
     "audience_expectation",
     "brand_messaging",
     "brand_performance",
+    "user_behaviour",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
@@ -44,6 +45,9 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     "advanced_metrics": ["shifting_audience_priorities"],
     "landscape_analysis": ["perception_analysis", "dominant_narratives"],
     "whitespace_gap_analysis": ["audience_expectation", "brand_messaging", "brand_performance"],
+    # New Tier 1 pillar (FE: "Consumer Segmentation Analysis"); this is the only
+    # place the backend enumerates Tier 1 keys, so adding it here is the whole change.
+    "consumer_segmentation": ["user_behaviour"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],
@@ -59,6 +63,7 @@ TIER2_GATE: dict[str, str] = {
     "audience_expectation": "Audience Expectation",
     "brand_messaging": "Brand Messaging",
     "brand_performance": "Brand Performance",
+    "user_behaviour": "User Behaviour Analysis",
 }
 
 

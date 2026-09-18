@@ -1423,8 +1423,84 @@ def _apply_performance(sb: dict, raw: dict) -> None:
         b.pop("posts", None)
 
 
+# ── user_behaviour ────────────────────────────────────────────────────────
+
+
+def _facts_behaviour(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    return {
+        "brand": meta["brand"], "competitors": meta["competitors"][:6], "window": meta["window"], "total_mentions": meta["total_mentions"],
+        "segments": {
+            "stats": sb["segments"]["banner"]["stats"],
+            "shares_shown": sb["segments"].get("shares_shown"),
+            "coverage_pct": sb["segments"].get("coverage_pct"),
+            "groups": [{"key": g["key"], "range": g["range"], "title": g["title"], "pct": g.get("pct"), "count": g["count"], "sample_posts": ev.get("segments", {}).get(g["key"], [])} for g in sb["segments"]["groups"]],
+        },
+        "multi": {
+            "stats": sb["multi"]["banner"]["stats"],
+            "multi_posts": sb["multi"].get("multi_posts"),
+            "brand_choice": sb["multi"]["brand_choice"],
+            "reasons": ev.get("reasons", []),
+            "rules": ev.get("rules", []),
+            "sample_posts": ev.get("multi_sample", []),
+        },
+    }
+
+
+_SCHEMA_BEHAVIOUR = {
+    "category": "str ≤ 5 words naming the product category",
+    "segments": {
+        "headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence; keep the given note's meaning when shares_shown is false", "lead": "str one sentence, rich",
+        "groups": [{"key": "key from facts", "title": "str ≤ 6 words, may refine", "points": ["2-3 bullets, rich, on behaviour, product use and what matters to this segment, grounded in sample_posts"]}],
+    },
+    "multi": {
+        "headline": "str ≤ 12 words", "sub": "str 1-2 sentences; when multi_posts is small say so plainly", "note": "str one sentence",
+        "questions": [
+            {"key": "why", "q": "str: the question re-worded for this category", "points": ["one bullet per item in facts.multi.reasons, rich, grounded in its sample_posts; empty list when reasons is empty"]},
+            {"key": "how", "q": "str: the question re-worded for this category", "points": ["one bullet per item in facts.multi.rules, rich, grounded in its sample_posts; empty list when rules is empty"]},
+        ],
+    },
+}
+
+
+def _apply_behaviour(sb: dict, raw: dict) -> None:
+    sb["meta"]["category"] = _plain(raw.get("category"), 60)
+    s = raw.get("segments") or {}
+    sb["segments"]["banner"]["headline"] = _plain(s.get("headline"), 120)
+    sb["segments"]["banner"]["sub"] = _plain(s.get("sub"), 400)
+    if sb["segments"].get("shares_shown"):
+        sb["segments"]["note"] = _plain(s.get("note"), 240)
+    sb["segments"]["lead"] = _rich(s.get("lead"), 300)
+    groups = {g["key"]: g for g in sb["segments"]["groups"]}
+    for item in s.get("groups") or []:
+        if isinstance(item, dict) and item.get("key") in groups:
+            if _plain(item.get("title")):
+                groups[item["key"]]["title"] = _plain(item.get("title"), 60)
+            groups[item["key"]]["points"] = [t for t in (_rich(x, 260) for x in _list(item.get("points"), 3, 300)) if t]
+    m = raw.get("multi") or {}
+    sb["multi"]["banner"]["headline"] = _plain(m.get("headline"), 120)
+    sb["multi"]["banner"]["sub"] = _plain(m.get("sub"), 400)
+    sb["multi"]["note"] = _plain(m.get("note"), 240)
+    qs = {q["key"]: q for q in sb["multi"]["questions"]}
+    limits = {"why": len(sb.get("evidence", {}).get("reasons", [])), "how": len(sb.get("evidence", {}).get("rules", []))}
+    for item in m.get("questions") or []:
+        if isinstance(item, dict) and item.get("key") in qs:
+            q = qs[item["key"]]
+            if _plain(item.get("q")):
+                q["q"] = _plain(item.get("q"), 120)
+            q["points"] = [t for t in (_rich(x, 260) for x in _list(item.get("points"), max(limits[item["key"]], 0), 300)) if t]
+    for g in sb["segments"]["groups"]:
+        g.pop("count", None)
+    for q in sb["multi"]["questions"]:
+        q.pop("key", None)
+    for k in ("coverage_pct", "shares_shown"):
+        sb["segments"].pop(k, None)
+    sb["multi"].pop("multi_posts", None)
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "user_behaviour": (_facts_behaviour, _SCHEMA_BEHAVIOUR, _apply_behaviour, "Write the User Behaviour Analysis copy. " + _WG_RULES),
     "audience_expectation": (_facts_expectation, _SCHEMA_EXPECTATION, _apply_expectation, "Write the Audience Expectation copy. " + _WG_RULES),
     "brand_messaging": (_facts_messaging, _SCHEMA_MESSAGING, _apply_messaging, "Write the Brand Messaging copy, one block per brand. " + _WG_RULES),
     "brand_performance": (_facts_performance, _SCHEMA_PERFORMANCE, _apply_performance, "Write the Brand Performance copy. " + _WG_RULES),

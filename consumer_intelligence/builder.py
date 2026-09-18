@@ -30,6 +30,7 @@ from .storyboard import (
     network_map,
     perception,
     trend,
+    user_behaviour,
 )
 from .storyboard.narrative import write_narrative
 from .tier_registry import COMING_SOON_TIER1, resolve_ci_lenses
@@ -53,6 +54,7 @@ _MODULES = {
     audience_expectation.LENS_KEY: audience_expectation,
     brand_messaging.LENS_KEY: brand_messaging,
     brand_performance.LENS_KEY: brand_performance,
+    user_behaviour.LENS_KEY: user_behaviour,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
@@ -71,6 +73,7 @@ _HAS_PREPARE = {
     audience_expectation.LENS_KEY,
     brand_messaging.LENS_KEY,
     brand_performance.LENS_KEY,
+    user_behaviour.LENS_KEY,
 }
 
 # Build order: cheapest first so the client sees something quickly.
@@ -89,6 +92,7 @@ _ORDER = [
     brand_performance.LENS_KEY,
     audience_expectation.LENS_KEY,
     brand_messaging.LENS_KEY,
+    user_behaviour.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -108,6 +112,7 @@ _HERO_QUERY = {
     audience_expectation.LENS_KEY: "audience expectations gap",
     brand_messaging.LENS_KEY: "brand campaign messaging",
     brand_performance.LENS_KEY: "brand performance comparison",
+    user_behaviour.LENS_KEY: "consumer segments behaviour",
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
@@ -120,6 +125,7 @@ _NO_HERO_MEDIA = {
     audience_expectation.LENS_KEY,
     brand_messaging.LENS_KEY,
     brand_performance.LENS_KEY,
+    user_behaviour.LENS_KEY,
 }
 
 
