@@ -34,6 +34,13 @@ from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, 
 router = APIRouter(tags=["consumer-intelligence"])
 
 
+def _session_category(record) -> str:
+    """The session's topic as configured (message_keywords, e.g. "car care");
+    used as the product category in the LLM audit prompts. Empty when unset."""
+    kws = getattr(record, "message_keywords", None) or []
+    return str(kws[0]).strip() if isinstance(kws, list) and kws else ""
+
+
 def _required_lenses(nodes: list[dict], requested: list[str] | None) -> list[str]:
     """Every CI lens key this session should carry, bundles expanded."""
     if requested:
@@ -227,6 +234,7 @@ async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, w
         skip_lenses=skip,
         session_id=session_id,
         refresh=refresh,
+        category=_session_category(record),
     )
     response = jsonable_encoder(_merge_payload(cached, payload))
     _save_cache(session_id, response)
@@ -296,6 +304,7 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             skip_lenses=skip,
             session_id=session_id,
             refresh=bool(refresh),
+            category=_session_category(record),
         )
         response = jsonable_encoder(_merge_payload(cached, payload))
         _save_cache(session_id, response)

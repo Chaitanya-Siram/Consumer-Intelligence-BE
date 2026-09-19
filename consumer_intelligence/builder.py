@@ -218,7 +218,7 @@ async def _build_one(
             if getattr(module, "PREPARE_ACCEPTS_CONTEXT", False):
                 # Lenses whose prepare() persists or reuses per-session work (the
                 # LLM audit run) need to know the session and whether this is a refresh.
-                prep_kwargs.update({"session_id": (context or {}).get("session_id"), "refresh": bool((context or {}).get("refresh"))})
+                prep_kwargs.update({"session_id": (context or {}).get("session_id"), "refresh": bool((context or {}).get("refresh")), "category": (context or {}).get("category") or ""})
             try:
                 kwargs["prepared"] = await module.prepare(articles, **prep_kwargs)
             except Exception as exc:  # classifiers have their own fallbacks; this is belt and braces
@@ -268,6 +268,7 @@ async def build_ci_charts(
     skip_lenses: set[str] | None = None,
     session_id: int | None = None,
     refresh: bool = False,
+    category: str = "",
 ) -> dict[str, Any]:
     """Build every selected CI lens. Returns `{lens_key: storyboard, ..., "coming_soon": {...}, "meta": {...}}`.
 
@@ -299,7 +300,7 @@ async def build_ci_charts(
 
     out: dict[str, Any] = {}
     prepared_cache: dict[str, dict] = {}
-    context = {"session_id": session_id, "refresh": refresh}
+    context = {"session_id": session_id, "refresh": refresh, "category": category}
     started = time.time()
     for lens_key in to_build:
         try:

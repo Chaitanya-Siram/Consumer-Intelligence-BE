@@ -58,10 +58,14 @@ def _slug(text: str) -> str:
 async def prepare(articles: list[dict], *, brand: str, known_brands: list[str], session_id: int | None = None, refresh: bool = False, category: str = "") -> dict:
     known = known_brands or ([brand] if brand else [])
     competitors = [k for k in known if k.lower() != (brand or "").lower()]
-    category = category or aggregate.top_n(aggregate.count_by(articles, "section", skip_junk=True), 1)[0][0] if articles else category
+    # `category` comes from the session's message keywords (e.g. "car care").
+    # Section labels are not a category, so no fallback to them; when empty the
+    # prompts say "the category" and the narrative names it from the responses.
+    category = (category or "").strip()
     run = llm_audit.load_run(session_id) if session_id is not None else None
     if refresh or not llm_audit.run_is_fresh(run, brand, category):
         run = await llm_audit.execute_run(brand=brand, category=category or "the category", competitors=competitors)
+        run["category"] = category   # empty stays empty so the narrative can name it from the responses
         run["session_id"] = session_id
         brand_posts = cohorts.brand_articles(articles, brand, known) or articles
         proposed = await propose_pillars(brand, category or "the category", brand_posts)

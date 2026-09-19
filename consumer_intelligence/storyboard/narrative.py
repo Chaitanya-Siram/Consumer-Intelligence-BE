@@ -1597,6 +1597,7 @@ def _facts_congruence(sb: dict) -> dict:
 
 
 _SCHEMA_CONGRUENCE = {
+    "category": "str ≤ 5 words naming the product category the brand competes in (not a dashboard or section name)",
     "overview": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence; mention how many assistants answered and that others were unavailable when assistants_unavailable is non-empty"},
     "analysis": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence; say whether sources were retrieved by the assistants or claimed by them, per citation_mode", "concentration": "str 1-2 sentences on where influence concentrates and per-assistant source preferences", "journalists": [{"name": "name from facts", "beat": "str 3-6 words from their headlines"}]},
     "interpretation": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence", "sentiment_note": "str 1-2 sentences on what drives positive and negative responses", "scores": [{"name": "name from facts", "text": "str one sentence explaining what the score means here"}]},
@@ -1611,6 +1612,8 @@ _SCHEMA_CONGRUENCE = {
 
 
 def _apply_congruence(sb: dict, raw: dict) -> None:
+    if not sb["meta"].get("category"):
+        sb["meta"]["category"] = _plain(raw.get("category"), 60)
     o = raw.get("overview") or {}
     sb["overview"]["banner"]["headline"] = _plain(o.get("headline"), 120)
     sb["overview"]["banner"]["sub"] = _plain(o.get("sub"), 400)
