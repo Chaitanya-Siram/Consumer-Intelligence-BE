@@ -25,6 +25,7 @@ CI_LENS_KEYS: set[str] = {
     "regional_sentiment",
     "regional_engagement",
     "regional_brand_perception",
+    "congruence_content",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
@@ -51,6 +52,8 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     # place the backend enumerates Tier 1 keys, so adding it here is the whole change.
     "consumer_segmentation": ["user_behaviour"],
     "regional_intelligence": ["regional_sentiment", "regional_engagement", "regional_brand_perception"],
+    # AI/LLM Audit and Analysis (FE label); the lens runs an LLM audit, not a tag aggregation.
+    "llm_audit": ["congruence_content"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],
@@ -70,6 +73,7 @@ TIER2_GATE: dict[str, str] = {
     "regional_sentiment": "State-Level Sentiment",
     "regional_engagement": "Engagement",
     "regional_brand_perception": "Brand Perception",
+    "congruence_content": "Congruence & Content Intelligence",
 }
 
 

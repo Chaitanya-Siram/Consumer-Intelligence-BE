@@ -23,6 +23,7 @@ from .storyboard import (
     brand_messaging,
     brand_perception,
     brand_performance,
+    congruence_content,
     dominant_narratives,
     emerging_issues,
     health,
@@ -61,6 +62,7 @@ _MODULES = {
     regional_sentiment.LENS_KEY: regional_sentiment,
     regional_engagement.LENS_KEY: regional_engagement,
     regional_brand_perception.LENS_KEY: regional_brand_perception,
+    congruence_content.LENS_KEY: congruence_content,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
@@ -83,6 +85,7 @@ _HAS_PREPARE = {
     regional_sentiment.LENS_KEY,
     regional_engagement.LENS_KEY,
     regional_brand_perception.LENS_KEY,
+    congruence_content.LENS_KEY,
 }
 
 # Build order: cheapest first so the client sees something quickly.
@@ -105,6 +108,7 @@ _ORDER = [
     regional_sentiment.LENS_KEY,
     regional_engagement.LENS_KEY,
     regional_brand_perception.LENS_KEY,
+    congruence_content.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -128,6 +132,7 @@ _HERO_QUERY = {
     regional_sentiment.LENS_KEY: "world map regions sentiment",
     regional_engagement.LENS_KEY: "regional market products",
     regional_brand_perception.LENS_KEY: "regional brands map",
+    congruence_content.LENS_KEY: "artificial intelligence audit",
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
@@ -144,6 +149,7 @@ _NO_HERO_MEDIA = {
     regional_sentiment.LENS_KEY,
     regional_engagement.LENS_KEY,
     regional_brand_perception.LENS_KEY,
+    congruence_content.LENS_KEY,
 }
 
 
@@ -193,6 +199,7 @@ async def _build_one(
     with_media: bool,
     theme_taxonomy: dict | None = None,
     prepared_cache: dict[str, dict] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict:
     module = _MODULES[lens_key]
     started = time.time()
@@ -207,8 +214,13 @@ async def _build_one(
             kwargs["prepared"] = prepared_cache[cache_key]
         else:
             await _emit(on_event, {"type": "progress", "stage": "classify", "lens": lens_key, "message": f"Classifying posts for {lens_key}…"})
+            prep_kwargs: dict[str, Any] = {"brand": brand, "known_brands": known_brands}
+            if getattr(module, "PREPARE_ACCEPTS_CONTEXT", False):
+                # Lenses whose prepare() persists or reuses per-session work (the
+                # LLM audit run) need to know the session and whether this is a refresh.
+                prep_kwargs.update({"session_id": (context or {}).get("session_id"), "refresh": bool((context or {}).get("refresh"))})
             try:
-                kwargs["prepared"] = await module.prepare(articles, brand=brand, known_brands=known_brands)
+                kwargs["prepared"] = await module.prepare(articles, **prep_kwargs)
             except Exception as exc:  # classifiers have their own fallbacks; this is belt and braces
                 logger.warning("CI prepare failed for %s: %s", lens_key, exc)
                 kwargs["prepared"] = {}
@@ -254,6 +266,8 @@ async def build_ci_charts(
     on_event: EmitFn | None = None,
     with_media: bool = True,
     skip_lenses: set[str] | None = None,
+    session_id: int | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Build every selected CI lens. Returns `{lens_key: storyboard, ..., "coming_soon": {...}, "meta": {...}}`.
 
@@ -285,10 +299,11 @@ async def build_ci_charts(
 
     out: dict[str, Any] = {}
     prepared_cache: dict[str, dict] = {}
+    context = {"session_id": session_id, "refresh": refresh}
     started = time.time()
     for lens_key in to_build:
         try:
-            out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media, theme_taxonomy=theme_taxonomy, prepared_cache=prepared_cache)
+            out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media, theme_taxonomy=theme_taxonomy, prepared_cache=prepared_cache, context=context)
             await _emit(on_event, {"type": "lens_complete", "lens": lens_key, "storyboard": out[lens_key]})
         except Exception as exc:
             logger.exception("CI lens %s failed", lens_key)

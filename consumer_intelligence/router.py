@@ -198,7 +198,7 @@ async def ci_charts(
     key = (session_id, tuple(missing))
     task = _inflight.get(key)
     if task is None:
-        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, record, with_media, skip, cached, missing))
+        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, record, with_media, skip, cached, missing, refresh=refresh))
         _inflight[key] = task
         task.add_done_callback(lambda _t, _k=key: _inflight.pop(_k, None))
     else:
@@ -215,7 +215,7 @@ async def ci_charts(
 _inflight: dict[tuple, asyncio.Task] = {}
 
 
-async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, with_media, skip, cached, missing) -> dict:
+async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, with_media, skip, cached, missing, refresh: bool = False) -> dict:
     started = time.time()
     payload = await build_ci_charts(
         workflow_nodes=nodes,
@@ -225,6 +225,8 @@ async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, w
         competitor_keywords=record.competitor_keywords,
         with_media=with_media,
         skip_lenses=skip,
+        session_id=session_id,
+        refresh=refresh,
     )
     response = jsonable_encoder(_merge_payload(cached, payload))
     _save_cache(session_id, response)
@@ -292,6 +294,8 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             on_event=emit,
             with_media=bool(with_media),
             skip_lenses=skip,
+            session_id=session_id,
+            refresh=bool(refresh),
         )
         response = jsonable_encoder(_merge_payload(cached, payload))
         _save_cache(session_id, response)

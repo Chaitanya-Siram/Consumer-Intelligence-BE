@@ -1578,8 +1578,93 @@ _REGIONAL_RULES = (
 )
 
 
+# ── congruence_content (LLM audit) ───────────────────────────────────────
+
+
+def _facts_congruence(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    a, i, s = sb["analysis"], sb["interpretation"], sb["scan"]
+    return {
+        "brand": meta["brand"], "category": meta.get("category"), "competitors": meta["competitors"][:6],
+        "llms": meta["llms"], "prompts_run": meta["prompts_run"], "responses": meta["responses"], "sources_cited": meta["sources_cited"],
+        "citation_mode": meta.get("citation_mode"), "assistants_unavailable": meta.get("assistants_unavailable"), "pillars_source": meta.get("pillars_source"),
+        "analysis": {"stats": a["banner"]["stats"], "source_types": a["source_types"], "sources": [{k: v for k, v in src.items() if k != "domain"} for src in a["sources"]], "journalists": a["journalists"], "per_llm_types": a.get("per_llm_types")},
+        "interpretation": {"stats": i["banner"]["stats"], "sentiment": i.get("sentiment"), "themes": i["themes"], "matrix": i.get("matrix"), "language": i["language"], "scores": [{"name": x["name"], "value": x["value"]} for x in i["scores"]]},
+        "scan": {"stats": s["banner"]["stats"], "pillars": [{k: v for k, v in p.items() if k != "llm"} for p in s["pillars"]], "heatmap": s.get("heatmap"), "social_gaps": ev.get("social_gaps", [])},
+        "sample_responses": ev.get("responses", []),
+        "pillar_examples": ev.get("pillar_examples", {}),
+    }
+
+
+_SCHEMA_CONGRUENCE = {
+    "overview": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence; mention how many assistants answered and that others were unavailable when assistants_unavailable is non-empty"},
+    "analysis": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence; say whether sources were retrieved by the assistants or claimed by them, per citation_mode", "concentration": "str 1-2 sentences on where influence concentrates and per-assistant source preferences", "journalists": [{"name": "name from facts", "beat": "str 3-6 words from their headlines"}]},
+    "interpretation": {"headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence", "sentiment_note": "str 1-2 sentences on what drives positive and negative responses", "scores": [{"name": "name from facts", "text": "str one sentence explaining what the score means here"}]},
+    "scan": {
+        "headline": "str ≤ 12 words", "sub": "str 1-2 sentences", "note": "str one sentence; say pillars were proposed from the brand's own coverage when pillars_source starts with 'proposed'",
+        "pillars": [{"key": "key from facts", "llm": "str one sentence: how the assistants describe this pillar, grounded in pillar_examples"}],
+        "flags": [{"tone": "risk|opportunity", "title": "str ≤ 6 words", "text": "str 1-2 sentences, rich, grounded in pillars, social_gaps or sources"}],
+        "actions": ["3 recommendations, 1-2 sentences each, naming outlets or journalists from facts.analysis where they exist"],
+        "_rules": "2-4 flags; include one about any social_gaps entry",
+    },
+}
+
+
+def _apply_congruence(sb: dict, raw: dict) -> None:
+    o = raw.get("overview") or {}
+    sb["overview"]["banner"]["headline"] = _plain(o.get("headline"), 120)
+    sb["overview"]["banner"]["sub"] = _plain(o.get("sub"), 400)
+    sb["overview"]["note"] = _plain(o.get("note"), 300)
+    a = raw.get("analysis") or {}
+    sb["analysis"]["banner"]["headline"] = _plain(a.get("headline"), 120)
+    sb["analysis"]["banner"]["sub"] = _plain(a.get("sub"), 400)
+    sb["analysis"]["note"] = _plain(a.get("note"), 300)
+    sb["analysis"]["concentration"] = _plain(a.get("concentration"), 400)
+    by_name = {j["name"]: j for j in sb["analysis"]["journalists"]}
+    for item in a.get("journalists") or []:
+        if isinstance(item, dict) and item.get("name") in by_name:
+            by_name[item["name"]]["beat"] = _plain(item.get("beat"), 60)
+    for j in sb["analysis"]["journalists"]:
+        j.pop("headlines", None)
+    sb["analysis"].pop("per_llm_types", None)
+    i = raw.get("interpretation") or {}
+    sb["interpretation"]["banner"]["headline"] = _plain(i.get("headline"), 120)
+    sb["interpretation"]["banner"]["sub"] = _plain(i.get("sub"), 400)
+    sb["interpretation"]["note"] = _plain(i.get("note"), 300)
+    sb["interpretation"]["sentiment_note"] = _plain(i.get("sentiment_note"), 400)
+    by_score = {x["name"]: x for x in sb["interpretation"]["scores"]}
+    for item in i.get("scores") or []:
+        if isinstance(item, dict) and item.get("name") in by_score:
+            by_score[item["name"]]["text"] = _plain(item.get("text"), 200)
+    for t in sb["interpretation"]["themes"]:
+        t.pop("key", None)
+    s = raw.get("scan") or {}
+    sb["scan"]["banner"]["headline"] = _plain(s.get("headline"), 120)
+    sb["scan"]["banner"]["sub"] = _plain(s.get("sub"), 400)
+    sb["scan"]["note"] = _plain(s.get("note"), 300)
+    by_key = {p["key"]: p for p in sb["scan"]["pillars"]}
+    for item in s.get("pillars") or []:
+        if isinstance(item, dict) and item.get("key") in by_key:
+            by_key[item["key"]]["llm"] = _plain(item.get("llm"), 240)
+    for p in sb["scan"]["pillars"]:
+        p.pop("key", None)
+        p.pop("contradict_pct", None)
+    sb["scan"]["flags"] = [
+        {"tone": f["tone"] if f.get("tone") in ("risk", "opportunity") else "risk", "title": _plain(f.get("title"), 60), "text": _rich(f.get("text"), 300)}
+        for f in (s.get("flags") or [])[:4] if isinstance(f, dict) and _plain(f.get("title")) and _rich(f.get("text"))
+    ]
+    sb["scan"]["actions"] = [t for t in (_plain(x, 300) for x in _list(s.get("actions"), 3, 320)) if t]
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
+    "congruence_content": (
+        _facts_congruence,
+        _SCHEMA_CONGRUENCE,
+        _apply_congruence,
+        "Write the Congruence & Content Intelligence copy for an AI-visibility audit. Attribute claims to assistants or outlets only when the data shows it. "
+        "Never state a number not in FACTS. " + _WG_RULES,
+    ),
     "regional_sentiment": (_facts_regional_sentiment, _SCHEMA_REGIONAL_SENTIMENT, _apply_regional_sentiment, "Write the State-Level Sentiment copy, one block per market. " + _REGIONAL_RULES),
     "regional_engagement": (_facts_regional_engagement, _SCHEMA_REGIONAL_ENGAGEMENT, _apply_regional_engagement, "Write the Regional Engagement copy, one block per market. " + _REGIONAL_RULES),
     "regional_brand_perception": (_facts_regional_brands, _SCHEMA_REGIONAL_BRANDS, _apply_regional_brands, "Write the Regional Brand Perception copy, one block per market. " + _REGIONAL_RULES),
