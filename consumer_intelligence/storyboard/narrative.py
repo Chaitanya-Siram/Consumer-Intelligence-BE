@@ -28,8 +28,15 @@ _SYSTEM = (
 )
 
 
+def _safe_cut(text: str, limit: int) -> str:
+    """Word-boundary-safe truncation with an ellipsis; never cuts mid-word."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(",;:.-") + "…"
+
+
 def _s(value, limit: int = 600) -> str:
-    return str(value or "").strip()[:limit]
+    return _safe_cut(str(value or "").strip(), limit)
 
 
 def _list(value, limit: int = 6, item_chars: int = 240) -> list[str]:
@@ -853,7 +860,10 @@ _MARK_OK = re.compile(r"<(?!/?mark>)[^>]*>")   # strip every tag except <mark>�
 def _rich(value, limit: int = 600) -> str:
     """Like _s but keeps <mark> highlights (contract: no other markup)."""
     text = _MARK_OK.sub("", str(value or "")).strip()
-    return text[:limit]
+    cut = _safe_cut(text, limit)
+    if cut.count("<mark>") > cut.count("</mark>"):
+        cut = cut.rsplit("<mark>", 1)[0].rstrip().rstrip(",;:.-") + "…"
+    return cut
 
 
 _ANY_TAG = re.compile(r"<[^>]+>")
@@ -1659,6 +1669,441 @@ def _apply_congruence(sb: dict, raw: dict) -> None:
     sb["scan"]["actions"] = [t for t in (_plain(x, 300) for x in _list(s.get("actions"), 3, 320)) if t]
 
 
+# ── social_research ────────────────────────────────────────────────────────
+
+
+def _facts_social_research(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    bp, cc, ob, mi, cs = sb["brand_perception"], sb["competitive_cultural"], sb["occasions_behaviors"], sb["motivations_identity"], sb["cultural_spaces"]
+    return {
+        "brand": meta["brand"],
+        "competitors": meta["competitors"][:6],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "brand_perception": {
+            "themes": [{"title": t["title"], "pct": t["pct"], "sample_posts": ev.get("themes", {}).get(t["title"], [])} for t in bp["themes"]],
+            "sentiment": bp["sentiment"],
+            "positive_drivers": [{"title": d["title"], "count": d["count"], "sample_posts": ev.get("positive_drivers", {}).get(d["title"], [])} for d in bp["drivers"]["positive"]],
+            "negative_drivers": [{"title": d["title"], "count": d["count"], "sample_posts": ev.get("negative_drivers", {}).get(d["title"], [])} for d in bp["drivers"]["negative"]],
+            "associations": bp["associations"],
+            "pillars": [{"title": p["title"], "pct": p["pct"], "quote": p.get("quote")} for p in bp["pillars"]],
+        },
+        "competitive_cultural": {
+            "share_of_voice": cc["share_of_voice"],
+            "net_sentiment": cc["net_sentiment"],
+            "culture_associations": [{"brand": c["brand"], "title": c["title"], "pct": c["pct"], "sample_posts": ev.get("competitive", {}).get(c["brand"], [])} for c in cc["culture_associations"]],
+            "whitespace": [{"topic": w["topic"], "competitor_share": w["competitor_share"], "brand_share": w["brand_share"], "gap": w["gap"]} for w in cc["whitespace"]],
+            "competitor_breakdown": [
+                {"brand": c["brand"], "mentions": c["mentions"], "top_themes": c["themes"][:3], "sample_posts": ev.get("competitive", {}).get(c["brand"], [])}
+                for c in cc["competitor_breakdown"]
+            ],
+        },
+        "occasions_behaviors": {"occasions": [{"title": o["title"], "pct": o["pct"], "sample_posts": ev.get("occasions", {}).get(o["key"], [])} for o in ob["occasions"]]},
+        "motivations_identity": {"motivations": [{"title": m["title"], "pct": m["pct"], "sample_posts": ev.get("motivations", {}).get(m["key"], [])} for m in mi["motivations"]]},
+        "cultural_spaces": {"spaces": [{"title": s["title"], "pct": s["pct"], "sample_posts": ev.get("cultural_spaces", {}).get(s["key"], [])} for s in cs["spaces"]]},
+    }
+
+
+_SCHEMA_SOCIAL_RESEARCH = {
+    "overview": {"headline": "str ≤ 10 words summarising the whole social research read", "sub": "str 1-2 sentences"},
+    "brand_perception": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "themes": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts — enough to read as a standalone insight, not a caption"}],
+        "drivers": {
+            "positive": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+            "negative": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+        },
+        "pillars": [{"title": "title from facts", "text": "str 2-3 sentences, grounded in the quote when one is given"}],
+    },
+    "competitive_cultural": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "culture_associations": [{"brand": "brand from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+        "competitor_breakdown": [{"brand": "brand from facts", "text": "str 1-2 sentences on what stands out about this competitor's conversation, grounded in top_themes and sample_posts"}],
+        "whitespace": [{
+            "topic": "topic from facts",
+            "why": "str 2 sentences: why this is a whitespace, grounded in competitor_share vs brand_share",
+            "gap_text": "str ≤ 12 words naming the brand's positioning gap on this topic",
+            "entry": "str 2 sentences recommending how the brand could enter this space",
+        }],
+    },
+    "occasions_behaviors": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "occasions": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+    },
+    "motivations_identity": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "motivations": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts", "opportunity": "str ≤ 20 words: a brand opportunity implied by this motivation"}],
+    },
+    "cultural_spaces": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "spaces": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+    },
+}
+
+
+def _apply_social_research(sb: dict, raw: dict) -> None:
+    ov = raw.get("overview") or {}
+    sb["overview"]["banner"]["headline"] = _plain(ov.get("headline"), 100)
+    sb["overview"]["banner"]["sub"] = _plain(ov.get("sub"), 400)
+
+    bp_raw = raw.get("brand_perception") or {}
+    bp = sb["brand_perception"]
+    bp["banner"]["headline"] = _plain(bp_raw.get("headline"), 100)
+    bp["banner"]["sub"] = _plain(bp_raw.get("sub"), 400)
+    themes = {t["title"]: t for t in bp["themes"]}
+    for item in bp_raw.get("themes") or []:
+        if isinstance(item, dict) and item.get("title") in themes:
+            themes[item["title"]]["text"] = _rich(item.get("text"), 440)
+    drv_raw = bp_raw.get("drivers") or {}
+    pos = {d["title"]: d for d in bp["drivers"]["positive"]}
+    for item in drv_raw.get("positive") or []:
+        if isinstance(item, dict) and item.get("title") in pos:
+            pos[item["title"]]["text"] = _rich(item.get("text"), 400)
+    neg = {d["title"]: d for d in bp["drivers"]["negative"]}
+    for item in drv_raw.get("negative") or []:
+        if isinstance(item, dict) and item.get("title") in neg:
+            neg[item["title"]]["text"] = _rich(item.get("text"), 400)
+    pillars = {p["title"]: p for p in bp["pillars"]}
+    for item in bp_raw.get("pillars") or []:
+        if isinstance(item, dict) and item.get("title") in pillars:
+            pillars[item["title"]]["text"] = _rich(item.get("text"), 440)
+
+    cc_raw = raw.get("competitive_cultural") or {}
+    cc = sb["competitive_cultural"]
+    cc["banner"]["headline"] = _plain(cc_raw.get("headline"), 100)
+    cc["banner"]["sub"] = _plain(cc_raw.get("sub"), 400)
+    assoc = {c["brand"]: c for c in cc["culture_associations"]}
+    for item in cc_raw.get("culture_associations") or []:
+        if isinstance(item, dict) and item.get("brand") in assoc:
+            assoc[item["brand"]]["text"] = _rich(item.get("text"), 400)
+    breakdown = {c["brand"]: c for c in cc["competitor_breakdown"]}
+    for item in cc_raw.get("competitor_breakdown") or []:
+        if isinstance(item, dict) and item.get("brand") in breakdown:
+            breakdown[item["brand"]]["text"] = _rich(item.get("text"), 300)
+    ws = {w["topic"]: w for w in cc["whitespace"]}
+    for item in cc_raw.get("whitespace") or []:
+        if isinstance(item, dict) and item.get("topic") in ws:
+            row = ws[item["topic"]]
+            row["why"] = _rich(item.get("why"), 320)
+            row["gap_text"] = _plain(item.get("gap_text"), 120)
+            row["entry"] = _rich(item.get("entry"), 320)
+
+    ob_raw = raw.get("occasions_behaviors") or {}
+    ob = sb["occasions_behaviors"]
+    ob["banner"]["headline"] = _plain(ob_raw.get("headline"), 100)
+    ob["banner"]["sub"] = _plain(ob_raw.get("sub"), 400)
+    occ = {o["title"]: o for o in ob["occasions"]}
+    for item in ob_raw.get("occasions") or []:
+        if isinstance(item, dict) and item.get("title") in occ:
+            occ[item["title"]]["text"] = _rich(item.get("text"), 440)
+
+    mi_raw = raw.get("motivations_identity") or {}
+    mi = sb["motivations_identity"]
+    mi["banner"]["headline"] = _plain(mi_raw.get("headline"), 100)
+    mi["banner"]["sub"] = _plain(mi_raw.get("sub"), 400)
+    mot = {m["title"]: m for m in mi["motivations"]}
+    for item in mi_raw.get("motivations") or []:
+        if isinstance(item, dict) and item.get("title") in mot:
+            mot[item["title"]]["text"] = _rich(item.get("text"), 400)
+            mot[item["title"]]["opportunity"] = _plain(item.get("opportunity"), 180)
+
+    cs_raw = raw.get("cultural_spaces") or {}
+    cs = sb["cultural_spaces"]
+    cs["banner"]["headline"] = _plain(cs_raw.get("headline"), 100)
+    cs["banner"]["sub"] = _plain(cs_raw.get("sub"), 400)
+    spaces = {s["title"]: s for s in cs["spaces"]}
+    for item in cs_raw.get("spaces") or []:
+        if isinstance(item, dict) and item.get("title") in spaces:
+            spaces[item["title"]]["text"] = _rich(item.get("text"), 400)
+
+
+# ── social_listening ──────────────────────────────────────────────────────
+
+
+def _facts_social_listening(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    oe, cs, ou, dd = sb["overall_expressions"], sb["conversation_settings"], sb["occasions_usage"], sb["expression_deep_dive"]
+    pillar_ev = ev.get("pillars", {})
+    return {
+        "brand": meta["brand"],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "overall_expressions": {
+            "pillars": [{"title": p["title"], "pct": p["pct"], "sample_posts": pillar_ev.get(p["title"], [])} for p in oe["pillars"]],
+            "pillar_breakdown": [{"pillar": b["pillar"], "mentions": b["mentions"], "platforms": b["platforms"], "sample_posts": pillar_ev.get(b["pillar"], [])} for b in oe["pillar_breakdown"]],
+        },
+        "conversation_settings": {
+            "pillar_breakdown": [{"pillar": b["pillar"], "settings": b["settings"], "sample_posts": pillar_ev.get(b["pillar"], [])} for b in cs["pillar_breakdown"]],
+        },
+        "occasions_usage": {
+            "pillar_breakdown": [{"pillar": b["pillar"], "relevant_pct": b["relevant_pct"], "occasion_types": b["occasion_types"], "sample_posts": pillar_ev.get(b["pillar"], [])} for b in ou["pillar_breakdown"]],
+        },
+        "expression_deep_dive": {
+            "pillar": dd["pillar"],
+            "literal_vs_figurative": dd["literal_vs_figurative"],
+            "figurative_settings": dd["figurative_settings"],
+            "sentiment": dd["sentiment"],
+            "sample_posts": pillar_ev.get(dd["pillar"], []) if dd["pillar"] else [],
+        },
+    }
+
+
+_SCHEMA_SOCIAL_LISTENING = {
+    "overview": {"headline": "str ≤ 10 words", "sub": "str 1-2 sentences"},
+    "overall_expressions": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "pillars": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+        "pillar_breakdown": [{"pillar": "pillar from facts", "text": "str 2-3 sentences on who uses this pillar and where, grounded in platforms and sample_posts"}],
+    },
+    "conversation_settings": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "pillar_breakdown": [{"pillar": "pillar from facts", "text": "str 2 sentences on the dominant conversation setting for this pillar, grounded in settings and sample_posts"}],
+    },
+    "occasions_usage": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "pillar_breakdown": [{"pillar": "pillar from facts", "text": "str 2 sentences on how occasion-tied this pillar's conversation is, grounded in relevant_pct, occasion_types and sample_posts"}],
+    },
+    "expression_deep_dive": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "text": "str 2-3 sentences on the literal-vs-figurative usage split and what it means, grounded in sample_posts",
+    },
+}
+
+
+def _apply_social_listening(sb: dict, raw: dict) -> None:
+    ov = raw.get("overview") or {}
+    sb["overview"]["banner"]["headline"] = _plain(ov.get("headline"), 100)
+    sb["overview"]["banner"]["sub"] = _plain(ov.get("sub"), 400)
+
+    oe_raw = raw.get("overall_expressions") or {}
+    oe = sb["overall_expressions"]
+    oe["banner"]["headline"] = _plain(oe_raw.get("headline"), 100)
+    oe["banner"]["sub"] = _plain(oe_raw.get("sub"), 400)
+    pillars = {p["title"]: p for p in oe["pillars"]}
+    for item in oe_raw.get("pillars") or []:
+        if isinstance(item, dict) and item.get("title") in pillars:
+            pillars[item["title"]]["text"] = _rich(item.get("text"), 440)
+    oe_breakdown = {b["pillar"]: b for b in oe["pillar_breakdown"]}
+    for item in oe_raw.get("pillar_breakdown") or []:
+        if isinstance(item, dict) and item.get("pillar") in oe_breakdown:
+            oe_breakdown[item["pillar"]]["text"] = _rich(item.get("text"), 400)
+
+    cs_raw = raw.get("conversation_settings") or {}
+    cs = sb["conversation_settings"]
+    cs["banner"]["headline"] = _plain(cs_raw.get("headline"), 100)
+    cs["banner"]["sub"] = _plain(cs_raw.get("sub"), 400)
+    cs_breakdown = {b["pillar"]: b for b in cs["pillar_breakdown"]}
+    for item in cs_raw.get("pillar_breakdown") or []:
+        if isinstance(item, dict) and item.get("pillar") in cs_breakdown:
+            cs_breakdown[item["pillar"]]["text"] = _rich(item.get("text"), 320)
+
+    ou_raw = raw.get("occasions_usage") or {}
+    ou = sb["occasions_usage"]
+    ou["banner"]["headline"] = _plain(ou_raw.get("headline"), 100)
+    ou["banner"]["sub"] = _plain(ou_raw.get("sub"), 400)
+    ou_breakdown = {b["pillar"]: b for b in ou["pillar_breakdown"]}
+    for item in ou_raw.get("pillar_breakdown") or []:
+        if isinstance(item, dict) and item.get("pillar") in ou_breakdown:
+            ou_breakdown[item["pillar"]]["text"] = _rich(item.get("text"), 320)
+
+    dd_raw = raw.get("expression_deep_dive") or {}
+    dd = sb["expression_deep_dive"]
+    dd["banner"]["headline"] = _plain(dd_raw.get("headline"), 100)
+    dd["banner"]["sub"] = _plain(dd_raw.get("sub"), 400)
+    dd["text"] = _rich(dd_raw.get("text"), 440)
+
+
+def _facts_social_audit(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    cl = sb["conversation_landscape"]
+
+    def _pillar_facts(tab: dict, theme_ev: dict) -> dict:
+        return {
+            "themes": [{"title": t["title"], "pct": t["pct"], "sample_posts": theme_ev.get(t["title"], [])} for t in tab["themes"]],
+            "sentiment": tab["sentiment"],
+        }
+
+    return {
+        "brand": meta["brand"],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "conversation_landscape": {"pillar_split": [{"key": p["key"], "pct": p["pct"]} for p in cl["pillar_split"]]},
+        "devices": _pillar_facts(sb["devices"], ev.get("devices_themes", {})),
+        "ai": _pillar_facts(sb["ai"], ev.get("ai_themes", {})),
+        "screentime": _pillar_facts(sb["screentime"], ev.get("screentime_themes", {})),
+        "additional_insights": {"whitespaces": [{"pillar": w["pillar"], "theme": w["theme"], "pct": w["pct"]} for w in sb["additional_insights"]["whitespaces"]]},
+    }
+
+
+_PILLAR_SCHEMA_SOCIAL_AUDIT = {
+    "headline": "str ≤ 10 words",
+    "sub": "str 1-2 sentences",
+    "themes": [{"title": "title from facts", "text": "str 2-3 sentences grounded in sample_posts"}],
+    "sentiment_positive_text": "str 2-3 sentences on why sentiment skews positive, grounded in sample_posts",
+    "sentiment_negative_text": "str 2-3 sentences on why sentiment skews negative, grounded in sample_posts",
+}
+
+_SCHEMA_SOCIAL_AUDIT = {
+    "overview": {"headline": "str ≤ 10 words", "sub": "str 1-2 sentences"},
+    "conversation_landscape": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "pillar_split": [{"key": "pillar key from facts", "text": "str 2-3 sentences on this pillar's conversation, grounded in its share of the total"}],
+    },
+    "devices": _PILLAR_SCHEMA_SOCIAL_AUDIT,
+    "ai": _PILLAR_SCHEMA_SOCIAL_AUDIT,
+    "screentime": _PILLAR_SCHEMA_SOCIAL_AUDIT,
+    "additional_insights": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "whitespaces": [{"pillar": "pillar from facts", "title": "str a short opportunity name, ≤ 6 words", "text": "str 2 sentences describing the opportunity, grounded in theme and pct"}],
+    },
+}
+
+
+def _apply_social_audit(sb: dict, raw: dict) -> None:
+    ov = raw.get("overview") or {}
+    sb["overview"]["banner"]["headline"] = _plain(ov.get("headline"), 100)
+    sb["overview"]["banner"]["sub"] = _plain(ov.get("sub"), 400)
+
+    cl_raw = raw.get("conversation_landscape") or {}
+    cl = sb["conversation_landscape"]
+    cl["banner"]["headline"] = _plain(cl_raw.get("headline"), 100)
+    cl["banner"]["sub"] = _plain(cl_raw.get("sub"), 400)
+    split_by_key = {p["key"]: p for p in cl["pillar_split"]}
+    for item in cl_raw.get("pillar_split") or []:
+        if isinstance(item, dict) and item.get("key") in split_by_key:
+            split_by_key[item["key"]]["text"] = _rich(item.get("text"), 320)
+
+    for pillar_key in ("devices", "ai", "screentime"):
+        p_raw = raw.get(pillar_key) or {}
+        tab = sb[pillar_key]
+        tab["banner"]["headline"] = _plain(p_raw.get("headline"), 100)
+        tab["banner"]["sub"] = _plain(p_raw.get("sub"), 400)
+        themes_by_title = {t["title"]: t for t in tab["themes"]}
+        for item in p_raw.get("themes") or []:
+            if isinstance(item, dict) and item.get("title") in themes_by_title:
+                themes_by_title[item["title"]]["text"] = _rich(item.get("text"), 400)
+        tab["sentiment_positive_text"] = _rich(p_raw.get("sentiment_positive_text"), 400)
+        tab["sentiment_negative_text"] = _rich(p_raw.get("sentiment_negative_text"), 400)
+
+    ai_raw = raw.get("additional_insights") or {}
+    ai_sb = sb["additional_insights"]
+    ai_sb["banner"]["headline"] = _plain(ai_raw.get("headline"), 100)
+    ai_sb["banner"]["sub"] = _plain(ai_raw.get("sub"), 400)
+    ws_by_pillar = {w["pillar"]: w for w in ai_sb["whitespaces"]}
+    for item in ai_raw.get("whitespaces") or []:
+        if isinstance(item, dict) and item.get("pillar") in ws_by_pillar:
+            ws_by_pillar[item["pillar"]]["title"] = _plain(item.get("title"), 60)
+            ws_by_pillar[item["pillar"]]["text"] = _rich(item.get("text"), 320)
+
+
+def _facts_pr_research(sb: dict) -> dict:
+    meta, ev = sb["meta"], sb.get("evidence", {})
+    ea = sb["editorial_analysis"]
+    ap = sb["audience_profile"]
+
+    def _period_facts(period: dict | None, pos_ev: dict, neg_ev: dict) -> dict | None:
+        if not period:
+            return None
+        return {
+            "window": period["window"],
+            "total": period["total"],
+            "sentiment": period["sentiment"],
+            "positive_drivers": [{"title": d["title"], "pct": d["pct"], "sample_posts": pos_ev.get(d["title"], [])} for d in period["positive_drivers"]],
+            "negative_drivers": [{"title": d["title"], "pct": d["pct"], "sample_posts": neg_ev.get(d["title"], [])} for d in period["negative_drivers"]],
+            "audience": [{"title": s["title"], "pct": s["pct"]} for s in period["audience"]],
+        }
+
+    return {
+        "brand": meta["brand"],
+        "window": meta["window"],
+        "total_mentions": meta["total_mentions"],
+        "early": _period_facts(ea["early"], ev.get("early_positive_themes", {}), ev.get("early_negative_themes", {})),
+        "late": _period_facts(ea["late"], ev.get("late_positive_themes", {}), ev.get("late_negative_themes", {})),
+    }
+
+
+_SCHEMA_PR_RESEARCH = {
+    "overview": {"headline": "str ≤ 10 words", "sub": "str 1-2 sentences"},
+    "editorial_analysis": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "narrative_shift": "str 2-3 sentences on how coverage changed from the early period to the late period, grounded in both periods' drivers and sentiment",
+        "early_positive_drivers": [{"title": "title from facts.early.positive_drivers", "text": "str 1-2 sentences grounded in sample_posts"}],
+        "early_negative_drivers": [{"title": "title from facts.early.negative_drivers", "text": "str 1-2 sentences grounded in sample_posts"}],
+        "late_positive_drivers": [{"title": "title from facts.late.positive_drivers", "text": "str 1-2 sentences grounded in sample_posts"}],
+        "late_negative_drivers": [{"title": "title from facts.late.negative_drivers", "text": "str 1-2 sentences grounded in sample_posts"}],
+    },
+    "authors": {"headline": "str ≤ 10 words", "sub": "str 1-2 sentences"},
+    "publications": {"headline": "str ≤ 10 words", "sub": "str 1-2 sentences"},
+    "audience_profile": {
+        "headline": "str ≤ 10 words",
+        "sub": "str 1-2 sentences",
+        "early_audience": [{"title": "title from facts.early.audience", "text": "str 1-2 sentences on why this segment engages, grounded in pct"}],
+        "late_audience": [{"title": "title from facts.late.audience", "text": "str 1-2 sentences on why this segment engages, grounded in pct"}],
+    },
+}
+
+
+def _apply_pr_research(sb: dict, raw: dict) -> None:
+    ov = raw.get("overview") or {}
+    sb["overview"]["banner"]["headline"] = _plain(ov.get("headline"), 100)
+    sb["overview"]["banner"]["sub"] = _plain(ov.get("sub"), 400)
+
+    ea_raw = raw.get("editorial_analysis") or {}
+    ea = sb["editorial_analysis"]
+    ea["banner"]["headline"] = _plain(ea_raw.get("headline"), 100)
+    ea["banner"]["sub"] = _plain(ea_raw.get("sub"), 400)
+    ea["narrative_shift"] = _rich(ea_raw.get("narrative_shift"), 440)
+
+    def _apply_drivers(period: dict | None, raw_items, key: str) -> None:
+        if not period:
+            return
+        by_title = {d["title"]: d for d in period[key]}
+        for item in raw_items or []:
+            if isinstance(item, dict) and item.get("title") in by_title:
+                by_title[item["title"]]["text"] = _rich(item.get("text"), 320)
+
+    _apply_drivers(ea["early"], ea_raw.get("early_positive_drivers"), "positive_drivers")
+    _apply_drivers(ea["early"], ea_raw.get("early_negative_drivers"), "negative_drivers")
+    _apply_drivers(ea["late"], ea_raw.get("late_positive_drivers"), "positive_drivers")
+    _apply_drivers(ea["late"], ea_raw.get("late_negative_drivers"), "negative_drivers")
+
+    au_raw = raw.get("authors") or {}
+    sb["authors"]["banner"]["headline"] = _plain(au_raw.get("headline"), 100)
+    sb["authors"]["banner"]["sub"] = _plain(au_raw.get("sub"), 400)
+
+    pu_raw = raw.get("publications") or {}
+    sb["publications"]["banner"]["headline"] = _plain(pu_raw.get("headline"), 100)
+    sb["publications"]["banner"]["sub"] = _plain(pu_raw.get("sub"), 400)
+
+    ap_raw = raw.get("audience_profile") or {}
+    ap = sb["audience_profile"]
+    ap["banner"]["headline"] = _plain(ap_raw.get("headline"), 100)
+    ap["banner"]["sub"] = _plain(ap_raw.get("sub"), 400)
+
+    def _apply_audience(period: dict | None, raw_items) -> None:
+        if not period:
+            return
+        by_title = {s["title"]: s for s in period["audience"]}
+        for item in raw_items or []:
+            if isinstance(item, dict) and item.get("title") in by_title:
+                by_title[item["title"]]["text"] = _rich(item.get("text"), 320)
+
+    _apply_audience(ap["early"], ap_raw.get("early_audience"))
+    _apply_audience(ap["late"], ap_raw.get("late_audience"))
+
+
 _REGISTRY = {
     "trend_intelligence": (_facts_trend, _SCHEMA_TREND, _apply_trend, "Write the Trend Intelligence storyboard copy."),
     "congruence_content": (
@@ -1706,6 +2151,44 @@ _REGISTRY = {
     "brand_intelligence": (_facts_brand_intel, _SCHEMA_BRAND_INTEL, _apply_brand_intel, "Write the Brand Intelligence category-trends report copy."),
     "market_intelligence": (_facts_market, _SCHEMA_MARKET, _apply_market, "Write the Market Intelligence report copy, one block per lens."),
     "network_map": (_facts_network, _SCHEMA_NETWORK, _apply_network, "Write the Network Map storyboard copy."),
+    "social_research": (
+        _facts_social_research,
+        _SCHEMA_SOCIAL_RESEARCH,
+        _apply_social_research,
+        "Write the Social Research copy across its sub-lenses: brand perception, competitive & cultural landscape, "
+        "occasions & behaviors, motivations & identity, cultural spaces. British spelling, present tense, no "
+        "marketing tone, no exclamation marks. Never state a number not in FACTS. Describe only what sample_posts "
+        "support; say less when a sample is thin. Ground each whitespace row's `why` in its competitor_share vs "
+        "brand_share gap.",
+    ),
+    "social_listening": (
+        _facts_social_listening,
+        _SCHEMA_SOCIAL_LISTENING,
+        _apply_social_listening,
+        "Write the Social Listening copy across its sub-lenses: overall expressions (pillars + who uses each, where), "
+        "primary conversation settings per pillar, usage across occasions per pillar, and the expression deep dive. "
+        "British spelling, present tense, no marketing tone, no exclamation marks. Never state a number not in FACTS. "
+        "Describe only what sample_posts support; say less when a sample is thin.",
+    ),
+    "social_audit": (
+        _facts_social_audit,
+        _SCHEMA_SOCIAL_AUDIT,
+        _apply_social_audit,
+        "Write the Social Audit copy across its three research pillars (Kids Parenting & Devices, & AI, & "
+        "Screentime): the conversation landscape split, each pillar's themes, and why each pillar's sentiment skews "
+        "positive or negative. Also name each pillar's whitespace opportunity from its smallest real theme. British "
+        "spelling, present tense, no marketing tone, no exclamation marks. Never state a number not in FACTS. "
+        "Describe only what sample_posts support; say less when a sample is thin.",
+    ),
+    "pr_research": (
+        _facts_pr_research,
+        _SCHEMA_PR_RESEARCH,
+        _apply_pr_research,
+        "Write the PR Research copy comparing the early and late period: the overall narrative shift, and why each "
+        "period's top positive/negative themes and audience segments engaged the way they did. British spelling, "
+        "present tense, no marketing tone, no exclamation marks. Never state a number not in FACTS. Describe only "
+        "what sample_posts support; say less when a sample is thin.",
+    ),
 }
 
 

@@ -109,6 +109,117 @@ async def brandfetch_brand(domain: str | None) -> dict | None:
         return None
 
 
+# ── Muck Rack ────────────────────────────────────────────────────────────
+#
+# A journalist byline has no domain of its own to hand Brandfetch, but Muck
+# Rack — the standard public directory PR professionals already use to look
+# up reporters — publishes one canonical, guessable profile URL per name
+# with a real headshot in its `og:image` tag. The site sits behind a
+# Cloudflare JS challenge, so a plain HTTP client (httpx) always gets the
+# "Just a moment…" interstitial rather than the real page — this needs a
+# real browser (Playwright, already a dependency for verbatim_capture.py's
+# screenshot capture), same idea, no stealth guarantees beyond that.
+# Best-effort only: the slug guess (lowercase, hyphenated full name) misses
+# on middle names/suffixes, a journalist simply not listed, or a still-blocked
+# challenge, and any of those returns None rather than raising — the
+# caller's existing initials-avatar fallback is what every other lens
+# already shows for a person with no photo.
+
+MUCKRACK_PROFILE = "https://muckrack.com"
+_OG_IMAGE_RX = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.I)
+_MUCKRACK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+# A hit here is permanent (a real journalist's photo doesn't change identity),
+# but a miss is often just Cloudflare's challenge not clearing in time rather
+# than a genuine absence — so only successes are cached, never failures. Every
+# build retries whatever names aren't cached yet; the cache only ever grows,
+# converging toward full coverage for recurring bylines across sessions.
+_PHOTO_CACHE_KEY = "author_photo_cache/muckrack.json"
+
+
+def load_author_photo_cache() -> dict[str, str]:
+    try:
+        import json
+
+        from file_helpers.s3_file import s3_file
+
+        return json.loads(s3_file.download_file(_PHOTO_CACHE_KEY).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def save_author_photo_cache(cache: dict[str, str]) -> None:
+    try:
+        import json
+
+        from file_helpers.s3_file import s3_file
+
+        s3_file.upload_file(_PHOTO_CACHE_KEY, json.dumps(cache).encode("utf-8"))
+    except Exception as exc:
+        logger.debug(f"Author photo cache write failed: {exc}")
+
+
+def _muckrack_slug(name: str) -> str | None:
+    slug = re.sub(r"[^a-z0-9\s-]", "", str(name or "").lower()).strip()
+    slug = re.sub(r"\s+", "-", slug)
+    return slug or None
+
+
+async def muckrack_author_photo(name: str, *, browser=None) -> str | None:
+    """Real headshot URL for a journalist's byline, via their Muck Rack
+    profile page — or None on any miss (no slug, still-blocked challenge,
+    404, no og:image). Pure best-effort lookup, never raises.
+
+    `browser` is an already-launched Playwright browser to reuse across
+    many lookups (see resolve_author_photos, which fans a batch of these
+    out over one shared instance); omit it to launch+close a throwaway
+    browser for a single one-off lookup."""
+    slug = _muckrack_slug(name)
+    if not slug:
+        return None
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.info("Playwright not installed; skipping Muck Rack author photo lookup.")
+        return None
+
+    async def _fetch(b) -> str | None:
+        page = None
+        try:
+            page = await b.new_page(user_agent=_MUCKRACK_UA, viewport={"width": 1280, "height": 800})
+            response = await page.goto(f"{MUCKRACK_PROFILE}/{slug}", wait_until="domcontentloaded", timeout=15000)
+            if response is not None and response.status >= 400:
+                return None
+            # Cloudflare's JS challenge (when this URL is behind one) runs a
+            # few seconds of client-side computation before redirecting to
+            # the real page; networkidle can fire while still parked on the
+            # challenge itself, so wait for the og:image tag to actually
+            # show up rather than trusting the first load event.
+            try:
+                await page.wait_for_selector('meta[property="og:image"]', timeout=10000)
+            except Exception:
+                pass
+            html = await page.content()
+            m = _OG_IMAGE_RX.search(html)
+            return m.group(1) if m else None
+        finally:
+            if page is not None:
+                await page.close()
+
+    try:
+        if browser is not None:
+            return await _fetch(browser)
+        async with async_playwright() as pw:
+            b = await pw.chromium.launch()
+            try:
+                return await _fetch(b)
+            finally:
+                await b.close()
+    except Exception as exc:
+        logger.debug("muckrack lookup failed for %r: %s", name, exc)
+        return None
+
+
 # ── Pexels ────────────────────────────────────────────────────────────────
 
 
@@ -234,8 +345,50 @@ async def resolve_hero_media(query: str, *, prefer_video: bool = False) -> dict 
     return await pexels_photo(query)
 
 
+# Real domains for well-known names whose naive slug is wrong — major news
+# outlets ("The New York Times" -> thenewyorktimes.com, not nytimes.com) and
+# government agencies ("IRS Direct File" -> irsdirectfile.com, not irs.gov)
+# are common enough in PR/media-monitoring datasets to warrant a small,
+# curated override table rather than leaving every multi-word or
+# abbreviated name to a wrong guess. Not exhaustive — a name not listed
+# here still falls through to the slug guess.
+_KNOWN_DOMAINS = {
+    "the new york times": "nytimes.com",
+    "new york times": "nytimes.com",
+    "ap": "apnews.com",
+    "associated press": "apnews.com",
+    "the associated press": "apnews.com",
+    "wsj": "wsj.com",
+    "the wall street journal": "wsj.com",
+    "wall street journal": "wsj.com",
+    "the washington post": "washingtonpost.com",
+    "washington post": "washingtonpost.com",
+    "the guardian": "theguardian.com",
+    "bbc": "bbc.com",
+    "npr": "npr.org",
+    "the hill": "thehill.com",
+    "politico": "politico.com",
+    "axios": "axios.com",
+    "reuters": "reuters.com",
+    "bloomberg": "bloomberg.com",
+    "irs": "irs.gov",
+    "irs direct file": "irs.gov",
+    "internal revenue service": "irs.gov",
+    # Social platforms named with a slash or shorthand slug to something wrong
+    # ("Twitter/X" -> naive slug "twitterx.com", which Brandfetch resolves to
+    # a near-blank 40x40 placeholder instead of failing outright, so the
+    # <img> onError fallback never triggers).
+    "twitter/x": "x.com",
+    "twitter": "x.com",
+    "x": "x.com",
+}
+
+
 def _slug_domain(name: str) -> str | None:
     """Fallback domain from a brand name: "Meguiar's" -> meguiars.com."""
+    known = _KNOWN_DOMAINS.get(str(name or "").strip().lower())
+    if known:
+        return known
     slug = "".join(ch for ch in str(name or "").lower() if ch.isalnum())
     return f"{slug}.com" if slug else None
 
