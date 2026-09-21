@@ -119,6 +119,30 @@ def _get(url: str, headers: dict[str, str]):
     return requests.get(url, headers=headers, timeout=_TIMEOUT, allow_redirects=True)
 
 
+def is_image_bytes(data: bytes | None) -> bool:
+    """A stored picture the browser can actually draw: big enough and starting
+    with a PNG, JPEG, GIF or WebP signature (an empty object, an HTML error
+    page or a truncated download all fail)."""
+    if not data or len(data) < _MIN_BYTES:
+        return False
+    return (
+        data.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8"))
+        or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")
+    )
+
+
+def known_absent(provider: str, handle: str) -> bool:
+    """This poster was already looked up in this process and has no picture to
+    find (deleted account, review page with no reviewer photo, blocked forum)."""
+    ident = (provider, handle.lower())
+    return ident in _RESOLVED and _RESOLVED[ident] is None
+
+
+def forget(provider: str, handle: str) -> None:
+    """Drop the in-process answer for a poster, so the next `_resolve` looks again."""
+    _RESOLVED.pop((provider, handle.lower()), None)
+
+
 def _is_real_image(resp) -> bool:
     kind = resp.headers.get("content-type", "")
     return (

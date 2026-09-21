@@ -15,10 +15,11 @@ table has no CI column and existing models must not change.
 
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
@@ -30,7 +31,7 @@ from file_helpers.s3_file import s3_file
 
 from .builder import build_ci_charts, expand_lenses
 from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, resolve_ci_lenses
-from . import brand_hero, brand_media, logo_resolver, qa_agent
+from . import brand_hero, brand_media, logo_resolver, qa_agent, qa_render
 from .profile_images import PROFILE_PREFIX
 from .verbatim_capture import SCREENSHOT_PREFIX
 
@@ -216,6 +217,34 @@ async def ci_qa(session_id: int, iterations: int | None = None, db: Session = De
         raise HTTPException(status_code=404, detail="No generated dashboard for this session yet.")
     articles = _articles_for_charts(db, session_id)
     report = await qa_agent.run(payload, articles, max_iterations=iterations)
+    await asyncio.to_thread(_save_cache, session_id, payload)
+    return report
+
+
+@router.post("/consumer-intelligence/qa/render")
+async def ci_qa_render(session_id: int, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> Any:
+    """Open the session's poster-picture dashboards in a real browser and report
+    whether the pictures and logos actually rendered (see qa_render.py). Runs as
+    the caller: their own bearer token is what the browser is given. Only the
+    configured frontend (FRONTEND_URL) is ever opened — never a caller-supplied
+    address, which would hand their token to it."""
+    record = get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="A bearer token is required.")
+    payload = _load_cache(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="No generated dashboard for this session yet.")
+    report = await qa_render.check_rendering(
+        payload,
+        frontend_url=os.getenv("FRONTEND_URL", "http://localhost:3000"),
+        project_id=record.project_id,
+        session_id=session_id,
+        token=token,
+    )
+    payload.setdefault("meta", {}).setdefault("qa", {})["render"] = report
     await asyncio.to_thread(_save_cache, session_id, payload)
     return report
 

@@ -73,3 +73,94 @@ def test_a_picture_given_to_several_posters_is_a_site_default_and_is_taken_back(
         for k in ("k1", "k2", "k3"):
             profile_images._SOURCE_URL.pop(k, None)
     assert rows == [{}, {}, {"avatar_key": "k3"}, {"name": "no avatar"}]
+
+
+# ── quality agent: profile pictures ────────────────────────────────────────
+
+import asyncio
+
+from consumer_intelligence import qa_agent
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 2000
+_ARTICLES = [{"url": "https://forum.example/t/1", "author": "Klasse Act", "content source name": "Forums"}]
+
+
+def _storyboard(**row):
+    return {"authors": {"late": {"authors_by_reach": [{"name": "Klasse Act", **row}]}}}
+
+
+class _Fakes:
+    """Swap the S3 read and the resolver for the duration of a QA run."""
+
+    def __init__(self, stored: dict, resolved: str | None):
+        self.stored, self.resolved = stored, resolved
+
+    def __enter__(self):
+        class S3:
+            def download_file(_, key):
+                if key not in self.stored:
+                    raise KeyError(key)
+                return self.stored[key]
+
+        async def resolve(provider, handle):
+            return self.resolved
+
+        self.saved = (qa_agent.s3_file, profile_images._resolve, dict(profile_images._RESOLVED))
+        qa_agent.s3_file, profile_images._resolve = S3(), resolve
+        profile_images._RESOLVED.clear()
+        return self
+
+    def __exit__(self, *exc):
+        qa_agent.s3_file, profile_images._resolve = self.saved[0], self.saved[1]
+        profile_images._RESOLVED.clear()
+        profile_images._RESOLVED.update(self.saved[2])
+
+
+def _run(payload):
+    return asyncio.run(qa_agent.run(payload, _ARTICLES, max_iterations=2, network=True))
+
+
+def test_is_image_bytes_accepts_real_images_and_rejects_empty_and_html_pages():
+    assert profile_images.is_image_bytes(_PNG)
+    assert profile_images.is_image_bytes(b"\xff\xd8\xff" + b"x" * 2000)
+    assert not profile_images.is_image_bytes(b"")
+    assert not profile_images.is_image_bytes(b"<html>" + b"x" * 2000)
+    assert not profile_images.is_image_bytes(b"\x89PNG")  # truncated
+
+
+def test_a_working_profile_picture_raises_no_issue():
+    payload = {"pr_research": _storyboard(avatar_key="k1")}
+    with _Fakes({"k1": _PNG}, None):
+        report = _run(payload)
+    assert report["remaining_count"] == 0 and payload["pr_research"]["authors"]["late"]["authors_by_reach"][0]["avatar_key"] == "k1"
+
+
+def test_a_profile_picture_the_endpoint_cannot_serve_is_dropped_and_reported_fixed():
+    payload = {"pr_research": _storyboard(avatar_key="gone")}
+    with _Fakes({"gone": b"<html>not an image</html>"}, None):
+        report = _run(payload)
+    assert "avatar_key" not in payload["pr_research"]["authors"]["late"]["authors_by_reach"][0]
+    assert report["fixed"].get("avatar_broken") == 1
+
+
+def test_a_broken_picture_is_replaced_by_a_fresh_one_when_the_poster_can_be_refetched():
+    payload = {"pr_research": _storyboard(avatar_key="gone")}
+    with _Fakes({"fresh": _PNG}, "fresh"):
+        _run(payload)
+    assert payload["pr_research"]["authors"]["late"]["authors_by_reach"][0]["avatar_key"] == "fresh"
+
+
+def test_an_author_row_with_a_findable_poster_but_no_picture_gets_one():
+    payload = {"pr_research": _storyboard()}
+    with _Fakes({"k2": _PNG}, "k2"):
+        report = _run(payload)
+    assert payload["pr_research"]["authors"]["late"]["authors_by_reach"][0]["avatar_key"] == "k2"
+    assert report["fixed"].get("avatar_missing") == 1
+
+
+def test_a_poster_already_known_to_have_no_picture_is_not_flagged_as_a_defect():
+    payload = {"pr_research": _storyboard()}
+    with _Fakes({}, None):
+        profile_images._RESOLVED[("post", "klasse act@forum.example")] = None
+        report = _run(payload)
+    assert report["remaining_count"] == 0
