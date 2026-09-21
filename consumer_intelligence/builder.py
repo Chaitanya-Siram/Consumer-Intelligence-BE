@@ -275,7 +275,13 @@ async def _build_one(
         # Same domain guess the validated-logo pipeline trusts, so the hero banner
         # and the brand's logo agree on which site is actually "the brand's own".
         hero_domain = next(iter(logo_resolver.candidate_domains(brand, articles)), None)
-        tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip(), brand=brand, domain=hero_domain))
+        # The category disambiguates a brand name that is also an ordinary word —
+        # "Armor All" alone (or paired with an abstract topic like "narratives")
+        # reliably pulls literal knight/military-vehicle stock photos on Pexels;
+        # adding "Car care products" turns the same search back into car-care imagery.
+        hero_category = (context or {}).get("category") or ""
+        hero_query = " ".join(filter(None, [brand, hero_category, _HERO_QUERY[lens_key]]))
+        tasks.append(brand_media.resolve_hero_media(hero_query, brand=brand, domain=hero_domain))
         tasks.append(brand_media.resolve_brand_assets(brand, articles))
     for section in _VERBATIM_SECTIONS.get(lens_key, ()):
         for quote_key in _QUOTE_KEYS:
