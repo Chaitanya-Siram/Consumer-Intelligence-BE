@@ -282,13 +282,28 @@ async def duckduckgo_image(query: str) -> dict | None:
         return None
 
 
+# query -> resolved photo dict, or None once tried and nothing was found.
+# Shared across every caller (per-dimension banners, lens-picker cards, an
+# eventual rebuild of the same session) so the same query is never re-sent
+# to DuckDuckGo/Pexels twice in one process's lifetime.
+_STOCK_CACHE: dict[str, dict | None] = {}
+
+
 async def stock_photo(query: str) -> dict | None:
     """One real photo for `query`: DuckDuckGo first, Pexels when DuckDuckGo
     has nothing usable. The one place both storyboard photo paths — the
     lens's top-level hero (`resolve_hero_media`) and every per-dimension/
-    per-tab sub-banner (`resolve_slot_images`) — pick a stock image, so the
-    fallback order only needs to be right in one spot."""
-    return await duckduckgo_image(query) or await pexels_photo(query)
+    per-tab sub-banner (`resolve_slot_images`) — and the lens-picker's own
+    card photos (see the `/consumer-intelligence/stock-image` endpoint) pick
+    a stock image, so the fallback order and the cache only need to be right
+    in one spot."""
+    if not query:
+        return None
+    if query in _STOCK_CACHE:
+        return _STOCK_CACHE[query]
+    photo = await duckduckgo_image(query) or await pexels_photo(query)
+    _STOCK_CACHE[query] = photo
+    return photo
 
 
 async def pexels_video(query: str) -> dict | None:

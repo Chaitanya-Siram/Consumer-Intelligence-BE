@@ -30,7 +30,7 @@ from file_helpers.s3_file import s3_file
 
 from .builder import build_ci_charts, expand_lenses
 from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, resolve_ci_lenses
-from . import brand_hero, logo_resolver, qa_agent
+from . import brand_hero, brand_media, logo_resolver, qa_agent
 from .profile_images import PROFILE_PREFIX
 from .verbatim_capture import SCREENSHOT_PREFIX
 
@@ -232,6 +232,18 @@ async def brand_hero_endpoint(brand: str, domain: str | None = None) -> Any:
         resolved_domain = next(iter(resolved_domain), None)
     hero = await brand_hero.resolve_brand_hero(resolved_domain, brand)
     return hero or {}
+
+
+@router.get("/consumer-intelligence/stock-image")
+async def stock_image_endpoint(query: str) -> Any:
+    """DuckDuckGo-then-Pexels photo for an arbitrary `query` — the same
+    resolver every dashboard banner uses (see `brand_media.stock_photo`),
+    exposed directly for callers with no session/brand context of their own,
+    such as the workflow builder's lens/sub-lens picker cards, which run in
+    the browser and can't reach either provider themselves (CORS/API key).
+    `{}` when nothing usable was found."""
+    photo = await brand_media.stock_photo(query)
+    return photo or {}
 
 
 @router.get("/consumer-intelligence/charts")

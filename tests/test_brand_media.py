@@ -118,10 +118,12 @@ def test_stock_photo_tries_duckduckgo_before_pexels():
 
     saved_ddg, saved_pexels = brand_media.duckduckgo_image, brand_media.pexels_photo
     brand_media.duckduckgo_image, brand_media.pexels_photo = fake_ddg, fake_pexels
+    brand_media._STOCK_CACHE.pop("Armor All wipes", None)
     try:
         result = asyncio.run(brand_media.stock_photo("Armor All wipes"))
     finally:
         brand_media.duckduckgo_image, brand_media.pexels_photo = saved_ddg, saved_pexels
+        brand_media._STOCK_CACHE.pop("Armor All wipes", None)
 
     assert result["url"] == "https://ddg.example/hit.jpg"
     assert calls == ["ddg"]  # pexels never called once duckduckgo already found something
@@ -136,12 +138,59 @@ def test_stock_photo_falls_back_to_pexels_when_duckduckgo_finds_nothing():
 
     saved_ddg, saved_pexels = brand_media.duckduckgo_image, brand_media.pexels_photo
     brand_media.duckduckgo_image, brand_media.pexels_photo = fake_ddg, fake_pexels
+    brand_media._STOCK_CACHE.pop("Armor All shine", None)
     try:
-        result = asyncio.run(brand_media.stock_photo("Armor All wipes"))
+        result = asyncio.run(brand_media.stock_photo("Armor All shine"))
     finally:
         brand_media.duckduckgo_image, brand_media.pexels_photo = saved_ddg, saved_pexels
+        brand_media._STOCK_CACHE.pop("Armor All shine", None)
 
     assert result["url"] == "https://pexels.example/hit.jpg"
+
+
+def test_stock_photo_caches_so_a_repeated_query_never_rehits_either_provider():
+    calls = []
+
+    async def fake_ddg(query):
+        calls.append(query)
+        return {"type": "image", "url": "https://ddg.example/hit.jpg", "source": "duckduckgo"}
+
+    saved_ddg = brand_media.duckduckgo_image
+    brand_media.duckduckgo_image = fake_ddg
+    brand_media._STOCK_CACHE.pop("Brand Intelligence lens", None)
+    try:
+        first = asyncio.run(brand_media.stock_photo("Brand Intelligence lens"))
+        second = asyncio.run(brand_media.stock_photo("Brand Intelligence lens"))
+    finally:
+        brand_media.duckduckgo_image = saved_ddg
+        brand_media._STOCK_CACHE.pop("Brand Intelligence lens", None)
+
+    assert first == second
+    assert calls == ["Brand Intelligence lens"]  # the second call served from cache, no second search
+
+
+def test_stock_photo_caches_a_miss_too_so_it_is_not_retried_forever():
+    calls = []
+
+    async def fake_ddg(query):
+        calls.append(query)
+        return None
+
+    async def fake_pexels(query):
+        return None
+
+    saved_ddg, saved_pexels = brand_media.duckduckgo_image, brand_media.pexels_photo
+    brand_media.duckduckgo_image, brand_media.pexels_photo = fake_ddg, fake_pexels
+    brand_media._STOCK_CACHE.pop("Nonexistent Lens Nobody Photographs", None)
+    try:
+        first = asyncio.run(brand_media.stock_photo("Nonexistent Lens Nobody Photographs"))
+        second = asyncio.run(brand_media.stock_photo("Nonexistent Lens Nobody Photographs"))
+    finally:
+        brand_media.duckduckgo_image, brand_media.pexels_photo = saved_ddg, saved_pexels
+        brand_media._STOCK_CACHE.pop("Nonexistent Lens Nobody Photographs", None)
+
+    assert first is None and second is None
+    assert calls == ["Nonexistent Lens Nobody Photographs"]
 
 
 def test_duckduckgo_image_returns_none_for_an_empty_query():
