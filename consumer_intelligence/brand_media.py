@@ -407,17 +407,22 @@ async def resolve_hero_media(query: str, *, brand: str | None = None, domain: st
 
 
 _SLOT_CONCURRENCY = 6
+_HEADLINE_QUERY_CHARS = 60
 
 
 def _slot_label(slot: dict) -> str:
     """The most specific name a sub-banner placeholder carries, for use as
     Pexels search context — a dimension's `name`, a trend tab's `title`, or
     whatever label the surrounding shell gave the slot."""
-    for key in ("name", "title", "label", "headline", "eyebrow", "tag"):
+    for key in ("name", "title", "label"):
         value = slot.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return ""
+    # Section banners carry a short tab title (eyebrow) plus an LLM-written
+    # headline; both go in, the headline trimmed so the search stays focused.
+    eyebrow = str(slot.get("eyebrow") or slot.get("tag") or "").strip()
+    headline = str(slot.get("headline") or "").strip()[:_HEADLINE_QUERY_CHARS]
+    return " ".join(filter(None, [eyebrow, headline]))
 
 
 async def resolve_slot_images(storyboard: dict, brand: str, category: str) -> None:
@@ -442,15 +447,17 @@ async def resolve_slot_images(storyboard: dict, brand: str, category: str) -> No
     """
     slots: list[dict] = []
 
-    def walk(node: object) -> None:
+    def walk(node: object, key: str = "") -> None:
         if isinstance(node, dict):
-            if "image" in node and node["image"] is None:
+            # A `banner` dict is always a slot, even where its builder never
+            # declared an `image` key (a dozen lenses' banners did not).
+            if node.get("image") is None and ("image" in node or key == "banner"):
                 slots.append(node)
-            for value in node.values():
-                walk(value)
+            for k, value in node.items():
+                walk(value, k)
         elif isinstance(node, list):
             for value in node:
-                walk(value)
+                walk(value, key)
 
     walk(storyboard)
     if not slots:

@@ -243,3 +243,27 @@ def test_duckduckgo_image_returns_none_when_the_search_raises():
             del sys.modules["ddgs"]
 
     assert result is None
+
+
+def test_resolve_slot_images_fills_a_banner_dict_that_never_declared_an_image_key():
+    async def fake_stock_photo(query):
+        return {"url": "https://images.example/x.jpg"}
+
+    storyboard = {
+        "tabs": [{"id": "t1", "label": "Issue Journey", "banner": {"eyebrow": "Issue Journey", "headline": "", "stats": []}}],
+        "journey": {"banner": {"eyebrow": "Issue Journey", "headline": "", "stats": []}},
+        "meta": {"issue": {"group": "x"}},  # not a banner, no image key: untouched
+    }
+    saved = _patch_stock_photo(fake_stock_photo)
+    try:
+        asyncio.run(brand_media.resolve_slot_images(storyboard, "Armor All", "Car care"))
+    finally:
+        brand_media.stock_photo = saved
+    assert storyboard["tabs"][0]["banner"]["image"] == "https://images.example/x.jpg"
+    assert storyboard["journey"]["banner"]["image"] == "https://images.example/x.jpg"
+    assert "image" not in storyboard["meta"]["issue"]
+
+
+def test_slot_label_combines_the_tab_title_and_a_trimmed_banner_headline():
+    label = brand_media._slot_label({"eyebrow": "Behaviour & Usage", "headline": "H" * 200})
+    assert label == "Behaviour & Usage " + "H" * brand_media._HEADLINE_QUERY_CHARS
