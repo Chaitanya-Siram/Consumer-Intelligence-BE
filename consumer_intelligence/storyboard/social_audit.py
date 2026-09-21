@@ -121,7 +121,7 @@ def _pillar_tab(articles: list[dict], prepared: dict, pillar: str) -> dict:
         "sentiment_summary": _sentiment_summary(sentiment),
         "sentiment_positive_text": "",
         "sentiment_negative_text": "",
-        "quotes": quotes.pick(rows, limit=4),
+        "quotes": quotes.pick(rows, limit=quotes.TOP_POSTS),
     }
 
 
@@ -160,7 +160,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "pillar_split": [{"key": p, "name": PILLAR_TITLES[p], "pct": next((r["pct"] for r in pillar_rows if r["name"] == PILLAR_TITLES[p]), 0), "count": pillar_counts[p], "text": ""} for p in PILLAR_KEYS],
         "trend": {"signals": pillar_trend_signals, "days": pillar_trend_days},
         "trend_summary": _trend_summary(pillar_trend_signals, pillar_trend_days),
-        "quotes": quotes.pick(articles, limit=4),
+        "quotes": quotes.pick(articles, limit=quotes.TOP_POSTS),
     }
 
     # ── Pillar tabs ──────────────────────────────────────────────────────

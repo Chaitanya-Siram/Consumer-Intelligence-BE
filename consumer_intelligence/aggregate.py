@@ -63,9 +63,11 @@ def reach(article: dict) -> float:
 
 
 def source_platform(article: dict) -> str:
-    """Section label as platform proxy for news articles."""
+    """The article's own source platform (Forums, Instagram, Amazon UK...) when the
+    upload carried one, else the section label as a proxy for news articles."""
     return str(
         article.get("source_type")
+        or article.get("content source name")
         or article.get("section")
         or article.get("domain")
         or "News"

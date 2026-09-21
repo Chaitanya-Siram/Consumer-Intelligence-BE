@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any, Awaitable, Callable
 
-from . import brand_media, taxonomy, verbatim_capture
+from . import brand_media, cohorts, logo_resolver, product_images, profile_images, qa_agent, taxonomy, verbatim_capture
 from .storyboard import (
     audience_expectation,
     audience_priorities,
@@ -164,6 +164,9 @@ _VERBATIM_SECTIONS = {
     pr_research.LENS_KEY: ("editorial_analysis",),
 }
 
+# Keys under a verbatim section that hold a quote list (PR Research splits by tone).
+_QUOTE_KEYS = ("quotes", "quotes_positive", "quotes_negative")
+
 # Lenses whose screens carry their own hero art; skip Pexels for them.
 # social_research/social_listening/social_audit are deliberately NOT here:
 # their hero banners want both Pexels art and brand_media.resolve_brand_assets()'s
@@ -265,15 +268,17 @@ async def _build_one(
 
     await _emit(on_event, {"type": "progress", "stage": "narrative", "lens": lens_key, "message": f"Writing {lens_key} narrative…"})
     tasks: list[Awaitable[Any]] = [write_narrative(lens_key, storyboard)]
+    enrich = with_media  # logos, avatars and product photos apply to every lens, hero-less ones included
     if lens_key in _NO_HERO_MEDIA:
         with_media = False
     if with_media:
         tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip()))
         tasks.append(brand_media.resolve_brand_assets(brand, articles))
     for section in _VERBATIM_SECTIONS.get(lens_key, ()):
-        quotes = storyboard.get(section, {}).get("quotes")
-        if quotes:
-            tasks.append(verbatim_capture.resolve_evidence(quotes))
+        for quote_key in _QUOTE_KEYS:
+            quotes = storyboard.get(section, {}).get(quote_key)
+            if quotes:
+                tasks.append(verbatim_capture.resolve_evidence(quotes))
     if lens_key == pr_research.LENS_KEY:
         tasks.append(pr_research.resolve_author_photos(storyboard))
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -289,6 +294,13 @@ async def _build_one(
                 hero["logo_url"] = brand_assets.get("logo_url")
         if brand_assets:
             storyboard.setdefault("meta", {})["brand_assets"] = brand_assets
+
+    if enrich:
+        await profile_images.attach(storyboard, articles)  # avatars for the people behind social posts
+        if lens_key == brand_perception.LENS_KEY:
+            await product_images.attach(storyboard)  # stock photo per product card
+        # Real, validated logos (brands, publications, source platforms) for the FE's meta.logos registry.
+        await logo_resolver.refine_logos(storyboard, articles, cohorts.platforms(articles, limit=8))
 
     storyboard.setdefault("meta", {})["elapsed_seconds"] = round(time.time() - started, 1)
     logger.info("CI lens %s built in %.1fs", lens_key, time.time() - started)
@@ -364,4 +376,7 @@ async def build_ci_charts(
         "total_articles": len(tagged_articles),
         "elapsed_seconds": round(time.time() - started, 1),
     }
+    if with_media:
+        # Cross-check the generated JSON against the source articles and repair it, with fallbacks (meta.qa).
+        await qa_agent.run(out, tagged_articles)
     return out

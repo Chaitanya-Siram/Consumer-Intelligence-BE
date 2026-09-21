@@ -30,6 +30,8 @@ from file_helpers.s3_file import s3_file
 
 from .builder import build_ci_charts, expand_lenses
 from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, resolve_ci_lenses
+from . import qa_agent
+from .profile_images import PROFILE_PREFIX
 from .verbatim_capture import SCREENSHOT_PREFIX
 
 router = APIRouter(tags=["consumer-intelligence"])
@@ -177,6 +179,45 @@ def verbatim_image(key: str) -> Response:
     except Exception as exc:
         raise HTTPException(status_code=404, detail="Image not found.") from exc
     return Response(content=content, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _image_type(data: bytes) -> str:
+    """Media type from the file's own signature; stored profile pictures are png, jpeg, gif or webp."""
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+@router.get("/consumer-intelligence/profile-image")
+def profile_image(key: str) -> Response:
+    """Streams a cached poster profile picture from S3. `key` is restricted to the
+    profile_images prefix so this can't be used to read arbitrary objects."""
+    if not key.startswith(PROFILE_PREFIX) or ".." in key:
+        raise HTTPException(status_code=400, detail="Invalid image key.")
+    try:
+        content = s3_file.download_file(key)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Image not found.") from exc
+    return Response(content=content, media_type=_image_type(content), headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.post("/consumer-intelligence/qa")
+async def ci_qa(session_id: int, iterations: int | None = None, db: Session = Depends(get_db)) -> Any:
+    """Run the verification-and-repair agent over a session's already-generated
+    dashboard JSON, save the corrected payload, and return the agent's report."""
+    if get_session(db, session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    payload = _load_cache(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="No generated dashboard for this session yet.")
+    articles = _articles_for_charts(db, session_id)
+    report = await qa_agent.run(payload, articles, max_iterations=iterations)
+    await asyncio.to_thread(_save_cache, session_id, payload)
+    return report
 
 
 @router.get("/consumer-intelligence/charts")
