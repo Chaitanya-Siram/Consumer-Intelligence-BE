@@ -255,6 +255,42 @@ async def pexels_photo(query: str, *, orientation: str = "landscape") -> dict | 
         return None
 
 
+async def duckduckgo_image(query: str) -> dict | None:
+    """One real image for `query` via DuckDuckGo's keyless image search — often
+    the actual product or brand photo itself (a retailer listing, a press
+    photo), not generic stock photography. No API key, no account; `ddgs` is
+    a synchronous scraping client, so the call runs off-thread. Tried first,
+    ahead of Pexels, for every banner/card photo — see `stock_photo` below.
+    """
+    if not query:
+        return None
+    try:
+        from ddgs import DDGS
+
+        def _search() -> list[dict]:
+            return DDGS().images(query, max_results=1, safesearch="moderate")
+
+        results = await asyncio.to_thread(_search)
+        if not results:
+            return None
+        url = results[0].get("image")
+        if not url:
+            return None
+        return {"type": "image", "url": url, "alt": results[0].get("title") or query, "source": "duckduckgo"}
+    except Exception as exc:
+        logger.debug("duckduckgo image search failed for %r: %s", query, exc)
+        return None
+
+
+async def stock_photo(query: str) -> dict | None:
+    """One real photo for `query`: DuckDuckGo first, Pexels when DuckDuckGo
+    has nothing usable. The one place both storyboard photo paths — the
+    lens's top-level hero (`resolve_hero_media`) and every per-dimension/
+    per-tab sub-banner (`resolve_slot_images`) — pick a stock image, so the
+    fallback order only needs to be right in one spot."""
+    return await duckduckgo_image(query) or await pexels_photo(query)
+
+
 async def pexels_video(query: str) -> dict | None:
     """One short stock video for `query`. `{url, type: 'mp4'}` or None."""
     if not query or not PEXELS_API_KEY:
@@ -339,8 +375,9 @@ async def resolve_brand_assets(brand: str, articles: list[dict]) -> dict:
 
 async def resolve_hero_media(query: str, *, brand: str | None = None, domain: str | None = None, prefer_video: bool = False) -> dict | None:
     """The brand's own homepage hero (video, or a vision-verified image) when
-    `brand`/`domain` are given; Pexels video (if preferred and available) else
-    photo otherwise or as the fallback."""
+    `brand`/`domain` are given — the strongest signal, since it's provably the
+    brand's own material. Pexels video next (if preferred and available).
+    `stock_photo` (DuckDuckGo, then Pexels) is the final fallback."""
     if domain:
         from . import brand_hero
 
@@ -351,7 +388,7 @@ async def resolve_hero_media(query: str, *, brand: str | None = None, domain: st
         video = await pexels_video(query)
         if video:
             return video
-    return await pexels_photo(query)
+    return await stock_photo(query)
 
 
 _SLOT_CONCURRENCY = 6
@@ -378,9 +415,11 @@ async def resolve_slot_images(storyboard: dict, brand: str, category: str) -> No
 
     Brand + category + the slot's own label keeps the query the same
     word-bias-safe shape as the top-level hero query: a bare brand name like
-    "Armor All" reliably pulls literal knight/military-vehicle stock photos
-    on Pexels, but adding the product category turns the same search back
-    into car-care imagery.
+    "Armor All" reliably pulls literal knight/military-vehicle stock photos,
+    but adding the product category turns the same search back into car-care
+    imagery. Each slot's photo comes from `stock_photo` — DuckDuckGo's real,
+    keyless image search first (often the actual product/brand photo, not
+    generic stock imagery), Pexels as the fallback.
 
     Mutates the storyboard in place. A slot Pexels has nothing for is simply
     left at None, so the FE's existing gradient fallback still applies to it.
@@ -408,7 +447,7 @@ async def resolve_slot_images(storyboard: dict, brand: str, category: str) -> No
         query = " ".join(filter(None, [brand, category, _slot_label(slot)]))
         try:
             async with sem:
-                photo = await pexels_photo(query)
+                photo = await stock_photo(query)
         except Exception as exc:  # belt and braces — a sub-banner photo is decoration
             logger.debug("slot image resolution failed for %r: %s", query, exc)
             return

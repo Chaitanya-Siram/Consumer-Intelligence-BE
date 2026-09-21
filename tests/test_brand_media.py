@@ -1,20 +1,30 @@
-"""Offline tests for brand_media.resolve_slot_images — the per-dimension /
-per-tab sub-banner photo fill that runs alongside the lens's single
-top-level hero. No test runner is configured in this repo (see CLAUDE.md);
+"""Offline tests for brand_media.resolve_slot_images (the per-dimension /
+per-tab sub-banner photo fill) and stock_photo's DuckDuckGo-then-Pexels
+fallback chain. No test runner is configured in this repo (see CLAUDE.md);
 run these the same way as tests/test_brand_hero.py.
 """
 
 import asyncio
+import sys
+import types
 
 from consumer_intelligence import brand_media
+
+
+def _patch_stock_photo(fake):
+    """resolve_slot_images calls stock_photo, not pexels_photo directly, so
+    tests that only care about the slot-filling logic mock at that seam."""
+    saved = brand_media.stock_photo
+    brand_media.stock_photo = fake
+    return saved
 
 
 def test_resolve_slot_images_fills_every_none_image_slot_found_anywhere():
     calls = []
 
-    async def fake_pexels_photo(query):
+    async def fake_stock_photo(query):
         calls.append(query)
-        return {"url": f"https://images.pexels.com/{query.replace(' ', '-')}.jpg"}
+        return {"url": f"https://images.example/{query.replace(' ', '-')}.jpg"}
 
     storyboard = {
         "hero": {"media": None},  # a different placeholder shape; must be left alone
@@ -26,38 +36,36 @@ def test_resolve_slot_images_fills_every_none_image_slot_found_anywhere():
             {"label": "Overview", "banner": {"title": "Product Recall", "image": None}},
         ],
     }
-    saved = brand_media.pexels_photo
-    brand_media.pexels_photo = fake_pexels_photo
+    saved = _patch_stock_photo(fake_stock_photo)
     try:
         asyncio.run(brand_media.resolve_slot_images(storyboard, "Armor All", "Car care products"))
     finally:
-        brand_media.pexels_photo = saved
+        brand_media.stock_photo = saved
 
-    assert storyboard["dimensions"][0]["image"] == "https://images.pexels.com/Armor-All-Car-care-products-Awareness.jpg"
-    assert storyboard["dimensions"][1]["image"] == "https://images.pexels.com/Armor-All-Car-care-products-Trust.jpg"
+    assert storyboard["dimensions"][0]["image"] == "https://images.example/Armor-All-Car-care-products-Awareness.jpg"
+    assert storyboard["dimensions"][1]["image"] == "https://images.example/Armor-All-Car-care-products-Trust.jpg"
     assert storyboard["tabs"][0]["banner"]["image"] is not None
     assert storyboard["hero"]["media"] is None  # untouched: no "image" key at that dict
     assert len(calls) == 3
 
 
-def test_resolve_slot_images_leaves_a_slot_at_none_when_pexels_has_nothing():
-    async def fake_pexels_photo(query):
+def test_resolve_slot_images_leaves_a_slot_at_none_when_nothing_is_found():
+    async def fake_stock_photo(query):
         return None
 
     storyboard = {"dimensions": [{"name": "Advocacy", "image": None}]}
-    saved = brand_media.pexels_photo
-    brand_media.pexels_photo = fake_pexels_photo
+    saved = _patch_stock_photo(fake_stock_photo)
     try:
         asyncio.run(brand_media.resolve_slot_images(storyboard, "Armor All", "Car care"))
     finally:
-        brand_media.pexels_photo = saved
+        brand_media.stock_photo = saved
     assert storyboard["dimensions"][0]["image"] is None
 
 
-def test_resolve_slot_images_never_calls_pexels_when_no_slots_need_filling():
+def test_resolve_slot_images_never_calls_stock_photo_when_no_slots_need_filling():
     calls = []
 
-    async def fake_pexels_photo(query):
+    async def fake_stock_photo(query):
         calls.append(query)
         return {"url": "unused"}
 
@@ -65,12 +73,11 @@ def test_resolve_slot_images_never_calls_pexels_when_no_slots_need_filling():
         "dimensions": [{"name": "Trust", "image": "https://already-resolved.example/x.jpg"}],
         "meta": {"brand": "Armor All"},
     }
-    saved = brand_media.pexels_photo
-    brand_media.pexels_photo = fake_pexels_photo
+    saved = _patch_stock_photo(fake_stock_photo)
     try:
         asyncio.run(brand_media.resolve_slot_images(storyboard, "Armor All", "Car care"))
     finally:
-        brand_media.pexels_photo = saved
+        brand_media.stock_photo = saved
     assert calls == []
     assert storyboard["dimensions"][0]["image"] == "https://already-resolved.example/x.jpg"
 
@@ -85,15 +92,105 @@ def test_slot_label_prefers_name_over_title_over_label_over_eyebrow():
 def test_resolve_slot_images_builds_the_query_from_brand_category_and_label():
     seen = {}
 
-    async def fake_pexels_photo(query):
+    async def fake_stock_photo(query):
         seen["query"] = query
         return None
 
     storyboard = {"dimensions": [{"name": "Awareness", "image": None}]}
-    saved = brand_media.pexels_photo
-    brand_media.pexels_photo = fake_pexels_photo
+    saved = _patch_stock_photo(fake_stock_photo)
     try:
         asyncio.run(brand_media.resolve_slot_images(storyboard, "Armor All", "Car care products"))
     finally:
-        brand_media.pexels_photo = saved
+        brand_media.stock_photo = saved
     assert seen["query"] == "Armor All Car care products Awareness"
+
+
+def test_stock_photo_tries_duckduckgo_before_pexels():
+    calls = []
+
+    async def fake_ddg(query):
+        calls.append("ddg")
+        return {"type": "image", "url": "https://ddg.example/hit.jpg", "source": "duckduckgo"}
+
+    async def fake_pexels(query):
+        calls.append("pexels")
+        return {"type": "image", "url": "https://pexels.example/hit.jpg", "source": "pexels"}
+
+    saved_ddg, saved_pexels = brand_media.duckduckgo_image, brand_media.pexels_photo
+    brand_media.duckduckgo_image, brand_media.pexels_photo = fake_ddg, fake_pexels
+    try:
+        result = asyncio.run(brand_media.stock_photo("Armor All wipes"))
+    finally:
+        brand_media.duckduckgo_image, brand_media.pexels_photo = saved_ddg, saved_pexels
+
+    assert result["url"] == "https://ddg.example/hit.jpg"
+    assert calls == ["ddg"]  # pexels never called once duckduckgo already found something
+
+
+def test_stock_photo_falls_back_to_pexels_when_duckduckgo_finds_nothing():
+    async def fake_ddg(query):
+        return None
+
+    async def fake_pexels(query):
+        return {"type": "image", "url": "https://pexels.example/hit.jpg", "source": "pexels"}
+
+    saved_ddg, saved_pexels = brand_media.duckduckgo_image, brand_media.pexels_photo
+    brand_media.duckduckgo_image, brand_media.pexels_photo = fake_ddg, fake_pexels
+    try:
+        result = asyncio.run(brand_media.stock_photo("Armor All wipes"))
+    finally:
+        brand_media.duckduckgo_image, brand_media.pexels_photo = saved_ddg, saved_pexels
+
+    assert result["url"] == "https://pexels.example/hit.jpg"
+
+
+def test_duckduckgo_image_returns_none_for_an_empty_query():
+    assert asyncio.run(brand_media.duckduckgo_image("")) is None
+
+
+def test_duckduckgo_image_extracts_the_first_hits_url_and_title():
+    fake_module = types.ModuleType("ddgs")
+
+    class FakeDDGS:
+        def images(self, query, max_results=1, safesearch="moderate"):
+            assert query == "Armor All Car care Awareness"
+            return [{"image": "https://retailer.example/product.jpg", "title": "Armor All Wipes"}]
+
+    fake_module.DDGS = FakeDDGS
+    saved = sys.modules.get("ddgs")
+    sys.modules["ddgs"] = fake_module
+    try:
+        result = asyncio.run(brand_media.duckduckgo_image("Armor All Car care Awareness"))
+    finally:
+        if saved is not None:
+            sys.modules["ddgs"] = saved
+        else:
+            del sys.modules["ddgs"]
+
+    assert result == {
+        "type": "image",
+        "url": "https://retailer.example/product.jpg",
+        "alt": "Armor All Wipes",
+        "source": "duckduckgo",
+    }
+
+
+def test_duckduckgo_image_returns_none_when_the_search_raises():
+    fake_module = types.ModuleType("ddgs")
+
+    class FakeDDGS:
+        def images(self, query, max_results=1, safesearch="moderate"):
+            raise RuntimeError("rate limited")
+
+    fake_module.DDGS = FakeDDGS
+    saved = sys.modules.get("ddgs")
+    sys.modules["ddgs"] = fake_module
+    try:
+        result = asyncio.run(brand_media.duckduckgo_image("Armor All"))
+    finally:
+        if saved is not None:
+            sys.modules["ddgs"] = saved
+        else:
+            del sys.modules["ddgs"]
+
+    assert result is None

@@ -38,3 +38,9 @@ tavily-python
 # posts with no public embed API. Needs `playwright install chromium` once
 # after installing requirements (not run automatically by pip).
 playwright==1.49.0
+# CI storyboard banners: keyless DuckDuckGo image search, tried before Pexels
+# for every card photo (see brand_media.duckduckgo_image) — MCP servers such
+# as the ddg-search one configured for this project are Claude Code's own
+# tools and are not reachable from this running server, so the backend talks
+# to DuckDuckGo directly instead.
+ddgs==9.16.0
