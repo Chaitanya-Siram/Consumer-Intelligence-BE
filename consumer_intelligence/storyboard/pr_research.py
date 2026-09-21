@@ -118,8 +118,8 @@ def _period_bundle(rows: list[dict], prepared: dict) -> dict:
         "publications_by_volume": publications_by_volume,
         "audience": audience,
         "audience_top": audience[0]["title"] if audience else "—",
-        "quotes_positive": quotes.pick(pos_rows, limit=4),
-        "quotes_negative": quotes.pick(neg_rows, limit=4),
+        "quotes_positive": quotes.pick(pos_rows, limit=quotes.TOP_POSTS),
+        "quotes_negative": quotes.pick(neg_rows, limit=quotes.TOP_POSTS),
     }
 
 

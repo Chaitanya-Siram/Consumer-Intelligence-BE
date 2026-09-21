@@ -16,6 +16,8 @@ _BREAKS = re.compile(r">>+|[\r\n]+|•|\|")
 _SENTENCES = re.compile(r"[^.!?]*[.!?]|[^.!?]+$")
 
 DEFAULT_CHARS = 240
+# "In their words" blocks show this many posts, strongest first.
+TOP_POSTS = 5
 MIN_CHARS = 40
 
 
@@ -30,7 +32,9 @@ def sentences(text: str) -> list[str]:
 
 
 def _text(article: dict) -> str:
-    return str(article.get("content") or article.get("summary") or article.get("title") or "")
+    # "full text" is the poster's own words; the LLM `summary` only stands in when
+    # the upload had no body, because a quote must never be a paraphrase.
+    return str(article.get("content") or article.get("full text") or article.get("summary") or article.get("title") or "")
 
 
 def snippet(article: dict, needles: list[str] | None = None, *, chars: int = DEFAULT_CHARS) -> str:
@@ -80,7 +84,16 @@ def pick(articles: list[dict], *, needles: list[str] | None = None, limit: int =
         tone_match = prefer is not None and a.get("sentiment") == prefer
         authored = bool(str(a.get("author") or "").strip())
         rank = (tone_match, has_needle, authored, -abs(len(text) - 170))
-        scored.append((rank, {"text": text, "source": source(a), "url": a.get("url") or ""}))
+        scored.append((rank, {
+            "text": text,
+            "source": source(a),
+            "url": a.get("url") or "",
+            # Facts for the designed post card the FE draws when the live post
+            # can't be embedded or captured.
+            "platform": cohorts.platform(a),
+            "author": str(a.get("author") or "").strip(),
+            "date": str(a.get("date") or "")[:10],
+        }))
     scored.sort(key=lambda t: t[0], reverse=True)
     out, seen = [], set()
     for _, q in scored:

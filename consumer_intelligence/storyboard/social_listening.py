@@ -129,7 +129,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "trend": {"signals": trend_signals, "days": trend_days},
         "trend_summary": _trend_summary(trend_signals, trend_days),
         "pillar_breakdown": overall_breakdown,
-        "quotes": quotes.pick([a for rows in pillar_rows_map.values() for a in rows], limit=4),
+        "quotes": quotes.pick([a for rows in pillar_rows_map.values() for a in rows], limit=quotes.TOP_POSTS),
     }
 
     # ── Primary Conversation Settings for Each Pillar ───────────────────────
@@ -183,7 +183,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         ]},
         "note": "",
         "pillar_breakdown": occasions_breakdown,
-        "quotes": quotes.pick([a for p in pillar_names for a in pillar_rows_map[p] if label_of(a, prepared).get("occasion_relevant")], limit=4),
+        "quotes": quotes.pick([a for p in pillar_names for a in pillar_rows_map[p] if label_of(a, prepared).get("occasion_relevant")], limit=quotes.TOP_POSTS),
     }
 
     # ── Expression Deep Dive (focus: the top pillar by volume) ──────────────
@@ -225,7 +225,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "figurative_settings_summary": _leader_summary(figurative_settings, "conversation setting"),
         "sentiment": deep_dive_sentiment,
         "sentiment_summary": _sentiment_summary(deep_dive_sentiment),
-        "quotes": quotes.pick(top_rows, limit=4),
+        "quotes": quotes.pick(top_rows, limit=quotes.TOP_POSTS),
     }
 
     # ── Overview ─────────────────────────────────────────────────────────

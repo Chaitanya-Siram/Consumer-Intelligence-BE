@@ -181,7 +181,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "drivers": {"positive": positive_drivers, "negative": negative_drivers},
         "associations": associations,
         "pillars": pillars,
-        "quotes": quotes.pick(brand_rows, limit=4),
+        "quotes": quotes.pick(brand_rows, limit=quotes.TOP_POSTS),
     }
 
     # ── Competitive & Cultural Landscape ────────────────────────────────────
@@ -273,7 +273,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "culture_associations": culture_associations[:4],
         "competitor_breakdown": competitor_breakdown,
         "whitespace": whitespace,
-        "quotes": quotes.pick(all_comp_rows, limit=4),
+        "quotes": quotes.pick(all_comp_rows, limit=quotes.TOP_POSTS),
     }
 
     # ── Occasions & Social Behaviors ─────────────────────────────────────────
@@ -308,7 +308,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         ]},
         "note": "",
         "motivations": motivations,
-        "quotes": quotes.pick([a for v in motivation_counts.values() for a in v], limit=4),
+        "quotes": quotes.pick([a for v in motivation_counts.values() for a in v], limit=quotes.TOP_POSTS),
     }
 
     # ── Cultural Spaces ──────────────────────────────────────────────────────
@@ -325,7 +325,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         ]},
         "note": "",
         "spaces": spaces,
-        "quotes": quotes.pick([a for v in space_counts.values() for a in v], limit=4),
+        "quotes": quotes.pick([a for v in space_counts.values() for a in v], limit=quotes.TOP_POSTS),
     }
 
     # ── Overview (aggregates the above; no independent computation) ─────────

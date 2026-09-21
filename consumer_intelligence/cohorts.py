@@ -55,7 +55,7 @@ def single_multiple(articles: list[dict], known: list[str]) -> tuple[list[dict],
 
 
 def platform(article: dict) -> str:
-    for field in ("source name", "source_name", "source_type", "platform"):
+    for field in ("source name", "source_name", "content source name", "source_type", "platform"):
         v = article.get(field)
         if v and not aggregate.is_junk(v):
             return str(v).strip()

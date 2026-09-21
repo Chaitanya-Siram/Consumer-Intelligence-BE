@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 SCREENSHOT_PREFIX = "verbatim_screenshots/"
 _CAPTURE_TIMEOUT_MS = 12000
+_SETTLE_MS = 1500
 _OEMBED_TIMEOUT = 6.0
 _CONCURRENCY = 3
 _NOT_FOUND_TITLE_HINTS = (
@@ -47,6 +48,18 @@ _NOT_FOUND_TITLE_HINTS = (
     "this page doesn't exist",
     "sorry, this page",
     "404",
+    # Bot challenges and login walls load with HTTP 200 but show no post, so a
+    # screenshot of them would be evidence of nothing.
+    "just a moment",
+    "attention required",
+    "access denied",
+    "error page",
+    "not acceptable",
+    "robot check",
+    "sign in",
+    "sign-in",
+    "log in",
+    "login",
 )
 
 _TWITTER_RX = re.compile(r"(?:twitter|x)\.com/[^/]+/status(?:es)?/(\d+)", re.I)
@@ -116,8 +129,9 @@ async def capture_screenshots(urls: list[str]) -> dict[str, str]:
         async with sem:
             page = None
             try:
-                page = await browser.new_page(viewport={"width": 640, "height": 720})
+                page = await browser.new_page(viewport={"width": 640, "height": 720}, user_agent=_PREVIEW_UA, locale="en-US")
                 response = await page.goto(url, wait_until="networkidle", timeout=_CAPTURE_TIMEOUT_MS)
+                await page.wait_for_timeout(_SETTLE_MS)  # lazy thumbnails and avatars load after networkidle
                 if response is not None and response.status >= 400:
                     logger.info(f"Verbatim screenshot skipped for {url}: HTTP {response.status}")
                     return
@@ -154,6 +168,8 @@ async def resolve_evidence(quotes: list[dict]) -> list[dict]:
     the quotes are returned exactly as given."""
     if not quotes:
         return quotes
+    for q in quotes:
+        q["evidence_tried"] = True  # lets the QA agent tell "never attempted" from "attempted and impossible"
     need_screenshot: list[str] = []
     candidates = [(q, detect_embed(q.get("url") or "")) for q in quotes]
 
@@ -191,4 +207,98 @@ async def resolve_evidence(quotes: list[dict]) -> list[dict]:
             key = captured.get(q.get("url") or "")
             if key:
                 q["screenshot_key"] = key
+
+    await _attach_previews([q for q in quotes if q.get("url") and not q.get("embed") and not q.get("screenshot_key")])
     return quotes
+
+
+# ── Scrape fallback ───────────────────────────────────────────────────────
+#
+# Login-walled platforms (Instagram, Facebook) and bot-blocked forums defeat both
+# the official embed and the headless screenshot. Their public HTML still carries
+# Open Graph tags, which is enough to draw a preview card that links to the post.
+
+_PREVIEW_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_META_RX = re.compile(r"<meta\s+[^>]*?>", re.I)
+_ATTR_RX = re.compile(r'([\w:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+_TITLE_RX = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_PREVIEW_KEYS = {
+    "og:title": "title",
+    "twitter:title": "title",
+    "og:description": "description",
+    "twitter:description": "description",
+    "description": "description",
+    "og:image": "image",
+    "twitter:image": "image",
+    "og:site_name": "site",
+}
+_PREVIEW_MAX_BYTES = 400_000
+
+
+def parse_preview(html: str, url: str) -> dict | None:
+    """Preview card fields from a page's `<meta>` tags: `{title, description,
+    image, site, favicon}`, or None when the page yields no title, description
+    or image. Pure — no network call. Relative image URLs are resolved."""
+    from html import unescape
+    from urllib.parse import urljoin, urlparse
+
+    found: dict[str, str] = {}
+    for tag in _META_RX.findall(html or ""):
+        attrs = {m[0].lower(): (m[1] or m[2]) for m in _ATTR_RX.findall(tag)}
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        field = _PREVIEW_KEYS.get(key)
+        content = attrs.get("content")
+        if field and content and field not in found:
+            found[field] = unescape(content).strip()
+    if "title" not in found:
+        m = _TITLE_RX.search(html or "")
+        if m:
+            found["title"] = unescape(m.group(1)).strip()
+    if "image" in found:
+        found["image"] = urljoin(url, found["image"])
+    if not any(found.get(k) for k in ("title", "description", "image")):
+        return None
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    found.setdefault("site", host)
+    found["favicon"] = f"https://www.google.com/s2/favicons?domain={host}&sz=64"
+    return {k: v[:300] for k, v in found.items() if v}
+
+
+async def _fetch_preview(url: str, client) -> dict | None:
+    """Best-effort scrape of one URL's preview card. Never raises."""
+    try:
+        resp = await client.get(url, headers={"User-Agent": _PREVIEW_UA, "Accept-Language": "en"}, timeout=_OEMBED_TIMEOUT, follow_redirects=True)
+        if resp.status_code >= 400:
+            return None
+        preview = parse_preview(resp.text[:_PREVIEW_MAX_BYTES], str(resp.url))
+        title = (preview or {}).get("title", "").lower()
+        if any(hint in title for hint in _NOT_FOUND_TITLE_HINTS):  # a login wall or bot challenge, not the post
+            return None
+        return preview
+    except Exception as exc:
+        logger.info(f"Preview scrape skipped for {url}: {exc}")
+        return None
+
+
+async def _attach_previews(quotes: list[dict]) -> None:
+    """Set `preview` on each quote whose page could be scraped. Never raises."""
+    if not quotes:
+        return
+    try:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            sem = asyncio.Semaphore(_CONCURRENCY)
+
+            async def one(q: dict) -> None:
+                async with sem:
+                    preview = await _fetch_preview(q["url"], client)
+                    if preview:
+                        q["preview"] = preview
+
+            await asyncio.gather(*(one(q) for q in quotes))
+    except Exception as exc:  # belt and braces — evidence resolution must never raise
+        logger.warning(f"resolve_evidence preview pass failed: {exc}")
