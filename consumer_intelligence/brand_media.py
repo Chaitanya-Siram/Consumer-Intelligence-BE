@@ -116,21 +116,23 @@ async def brandfetch_brand(domain: str | None) -> dict | None:
 # Rack — the standard public directory PR professionals already use to look
 # up reporters — publishes one canonical, guessable profile URL per name
 # with a real headshot in its `og:image` tag. The site sits behind a
-# Cloudflare JS challenge, so a plain HTTP client (httpx) always gets the
-# "Just a moment…" interstitial rather than the real page — this needs a
-# real browser (Playwright, already a dependency for verbatim_capture.py's
-# screenshot capture), same idea, no stealth guarantees beyond that.
-# Best-effort only: the slug guess (lowercase, hyphenated full name) misses
-# on middle names/suffixes, a journalist simply not listed, or a still-blocked
-# challenge, and any of those returns None rather than raising — the
-# caller's existing initials-avatar fallback is what every other lens
-# already shows for a person with no photo.
+# Cloudflare challenge that a plain HTTP client or a stock headless browser
+# never clears, so profiles are fetched with scrapling's stealth fetcher,
+# which solves it.
+#
+# The URL is a *guess* (lowercase, hyphenated full name), so a hit is only
+# trusted when the profile's own name matches the byline — otherwise a short
+# handle such as "DFB" lands on some unrelated journalist's page — and Muck
+# Rack's generic silhouette is never used as a "photo". Best-effort: any miss
+# returns nothing, and the caller keeps its initials-avatar fallback.
 
 MUCKRACK_PROFILE = "https://muckrack.com"
-_OG_IMAGE_RX = re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.I)
-_MUCKRACK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+_MAX_PROFILE_LOOKUPS = 12  # each stealth fetch takes ~10s; bound one build's cost
+_PROFILE_TIMEOUT_MS = 60000
+_PLACEHOLDER_PHOTO_MARKERS = ("icon-user-circle", "/static/images/")
+_NAME_TOKEN_RX = re.compile(r"[a-z0-9]+")
 
-# A hit here is permanent (a real journalist's photo doesn't change identity),
+# A hit is permanent (a real journalist's photo doesn't change identity),
 # but a miss is often just Cloudflare's challenge not clearing in time rather
 # than a genuine absence — so only successes are cached, never failures. Every
 # build retries whatever names aren't cached yet; the cache only ever grows,
@@ -160,65 +162,79 @@ def save_author_photo_cache(cache: dict[str, str]) -> None:
         logger.debug(f"Author photo cache write failed: {exc}")
 
 
-def _muckrack_slug(name: str) -> str | None:
-    slug = re.sub(r"[^a-z0-9\s-]", "", str(name or "").lower()).strip()
-    slug = re.sub(r"\s+", "-", slug)
-    return slug or None
+def _name_tokens(name: str) -> list[str]:
+    return _NAME_TOKEN_RX.findall(str(name or "").lower())
 
 
-async def muckrack_author_photo(name: str, *, browser=None) -> str | None:
-    """Real headshot URL for a journalist's byline, via their Muck Rack
-    profile page — or None on any miss (no slug, still-blocked challenge,
-    404, no og:image). Pure best-effort lookup, never raises.
+def looks_like_person_name(name: str) -> bool:
+    """A byline worth a directory lookup: at least two words. A lone token —
+    a forum handle ("kristyg58"), a brand ("Meguiars"), "Anonymous" — is not a
+    reporter's name, and its guessed slug only ever finds someone else."""
+    return len(_name_tokens(name)) >= 2
 
-    `browser` is an already-launched Playwright browser to reuse across
-    many lookups (see resolve_author_photos, which fans a batch of these
-    out over one shared instance); omit it to launch+close a throwaway
-    browser for a single one-off lookup."""
-    slug = _muckrack_slug(name)
-    if not slug:
-        return None
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        logger.info("Playwright not installed; skipping Muck Rack author photo lookup.")
-        return None
 
-    async def _fetch(b) -> str | None:
-        page = None
+def is_placeholder_photo(url: str | None) -> bool:
+    return not url or any(marker in url for marker in _PLACEHOLDER_PHOTO_MARKERS)
+
+
+def profile_matches(name: str, profile_name: str) -> bool:
+    """The profile is this byline's: every word of the byline appears in the
+    profile's own name ("Kara Swisher" is "Kara Swisher"; a middle name is
+    fine; "DFB" is not "Daniel Farber-Ball")."""
+    wanted = _name_tokens(name)
+    return len(wanted) >= 2 and set(wanted) <= set(_name_tokens(profile_name))
+
+
+def _muckrack_slugs(name: str) -> list[str]:
+    """Profile URL slugs to try, most common first: Muck Rack canonicalises
+    some names hyphenated ("kara-swisher" redirects) and others joined
+    ("waltmossberg" — the hyphenated form 404s)."""
+    words = re.sub(r"[^a-z0-9\s-]", "", str(name or "").lower()).split()
+    if not words:
+        return []
+    return list(dict.fromkeys(["-".join(words), "".join(words)]))
+
+
+def _first_matching_profile_photo(session, name: str) -> str | None:
+    for slug in _muckrack_slugs(name):
         try:
-            page = await b.new_page(user_agent=_MUCKRACK_UA, viewport={"width": 1280, "height": 800})
-            response = await page.goto(f"{MUCKRACK_PROFILE}/{slug}", wait_until="domcontentloaded", timeout=15000)
-            if response is not None and response.status >= 400:
-                return None
-            # Cloudflare's JS challenge (when this URL is behind one) runs a
-            # few seconds of client-side computation before redirecting to
-            # the real page; networkidle can fire while still parked on the
-            # challenge itself, so wait for the og:image tag to actually
-            # show up rather than trusting the first load event.
-            try:
-                await page.wait_for_selector('meta[property="og:image"]', timeout=10000)
-            except Exception:
-                pass
-            html = await page.content()
-            m = _OG_IMAGE_RX.search(html)
-            return m.group(1) if m else None
-        finally:
-            if page is not None:
-                await page.close()
+            page = session.fetch(f"{MUCKRACK_PROFILE}/{slug}")
+            if page.status >= 400:
+                continue
+            profile_name = " ".join((page.css("h1.profile-name::text").get() or "").split())
+            photo = page.css('meta[property="og:image"]::attr(content)').get()
+        except Exception as exc:
+            logger.debug("muckrack lookup failed for %r (%s): %s", name, slug, exc)
+            continue
+        if profile_matches(name, profile_name) and not is_placeholder_photo(photo):
+            return photo
+    return None
 
+
+def _lookup_muckrack_batch(names: list[str]) -> dict[str, str]:
+    """Blocking: one shared stealth browser for the whole batch."""
+    from scrapling.fetchers import StealthySession
+
+    found: dict[str, str] = {}
+    with StealthySession(headless=True, solve_cloudflare=True, network_idle=True, timeout=_PROFILE_TIMEOUT_MS) as session:
+        for name in names:
+            photo = _first_matching_profile_photo(session, name)
+            if photo:
+                found[name] = photo
+    return found
+
+
+async def muckrack_author_photos(names: list[str]) -> dict[str, str]:
+    """`{byline: headshot_url}` for the bylines that resolved to a matching,
+    real Muck Rack profile photo. Never raises."""
+    todo = [n for n in dict.fromkeys(names) if looks_like_person_name(n)][:_MAX_PROFILE_LOOKUPS]
+    if not todo:
+        return {}
     try:
-        if browser is not None:
-            return await _fetch(browser)
-        async with async_playwright() as pw:
-            b = await pw.chromium.launch()
-            try:
-                return await _fetch(b)
-            finally:
-                await b.close()
+        return await asyncio.to_thread(_lookup_muckrack_batch, todo)
     except Exception as exc:
-        logger.debug("muckrack lookup failed for %r: %s", name, exc)
-        return None
+        logger.warning("Muck Rack author photo batch unavailable: %s", exc)
+        return {}
 
 
 # ── Pexels ────────────────────────────────────────────────────────────────

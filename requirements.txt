@@ -44,3 +44,7 @@ playwright==1.49.0
 # tools and are not reachable from this running server, so the backend talks
 # to DuckDuckGo directly instead.
 ddgs==9.16.0
+# PR Research author headshots: Muck Rack sits behind a Cloudflare challenge a
+# plain browser never clears; scrapling's stealth fetcher solves it. On a fresh
+# machine run `scrapling install` once for its browser (like playwright above).
+scrapling[fetchers]==0.4.15

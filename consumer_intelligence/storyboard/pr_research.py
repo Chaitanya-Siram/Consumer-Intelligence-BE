@@ -16,7 +16,6 @@ pr_research_classify.prepare(). Every number here is computed from the
 tagged articles; every prose field is left empty for narrative.py to fill.
 """
 
-import asyncio
 import logging
 
 from .. import aggregate, brand_media, cohorts, quotes, taxonomy, timeseries
@@ -26,8 +25,6 @@ logger = logging.getLogger(__name__)
 
 LENS_KEY = "pr_research"
 __all__ = ["LENS_KEY", "build_storyboard", "prepare", "resolve_author_photos"]
-
-_PHOTO_CONCURRENCY = 5
 
 TABS = [
     {"id": "overview", "label": "Overview"},
@@ -236,15 +233,18 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
 
 
 async def resolve_author_photos(storyboard: dict) -> None:
-    """Real Muck Rack headshots for every author row (both rankings, both
-    periods), mutated in place. Deduplicated by name — an author who leads
-    both the reach and volume rankings, or appears in both periods, is
-    looked up once, over one shared browser instance rather than one launch
-    per author. A global cache (see brand_media.load/save_author_photo_cache)
-    means a name only ever needs to clear Cloudflare's challenge once across
-    every session, ever — this call only fetches names not already cached.
-    Never raises: a name that's neither cached nor freshly resolved just
-    keeps the FE's existing initials-avatar fallback."""
+    """Real Muck Rack headshots for every reporter-like author row (both
+    rankings, both periods), mutated in place. Deduplicated by name — an
+    author who leads both the reach and volume rankings, or appears in both
+    periods, is looked up once, over one shared stealth browser (scrapling).
+    A global cache (see brand_media.load/save_author_photo_cache) means a name
+    only ever needs to clear Cloudflare's challenge once across every session,
+    ever — this call only fetches names not already cached.
+
+    Only bylines that look like a person's name are looked up, and only a
+    profile whose own name matches the byline is used (see
+    brand_media.profile_matches): a forum handle or "Anonymous" keeps the FE's
+    initials avatar instead of borrowing a stranger's photo. Never raises."""
     authors = storyboard.get("authors") or {}
     rows_by_name: dict[str, list[dict]] = {}
     for period in (authors.get("early"), authors.get("late")):
@@ -259,8 +259,10 @@ async def resolve_author_photos(storyboard: dict) -> None:
     cache = brand_media.load_author_photo_cache()
     to_fetch = []
     for name, rows in rows_by_name.items():
+        if not brand_media.looks_like_person_name(name):
+            continue
         cached_url = cache.get(name)
-        if cached_url:
+        if cached_url and not brand_media.is_placeholder_photo(cached_url):
             for row in rows:
                 row["photo_url"] = cached_url
         else:
@@ -269,32 +271,10 @@ async def resolve_author_photos(storyboard: dict) -> None:
     if not to_fetch:
         return
 
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        logger.info("Playwright not installed; skipping Muck Rack author photo lookups.")
-        return
-
-    sem = asyncio.Semaphore(_PHOTO_CONCURRENCY)
-    newly_found: dict[str, str] = {}
-
-    async def one(browser, name: str) -> None:
-        async with sem:
-            url = await brand_media.muckrack_author_photo(name, browser=browser)
-        if url:
-            newly_found[name] = url
-            for row in rows_by_name[name]:
-                row["photo_url"] = url
-
-    try:
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
-            try:
-                await asyncio.gather(*(one(browser, name) for name in to_fetch), return_exceptions=True)
-            finally:
-                await browser.close()
-    except Exception as exc:
-        logger.warning("Author photo batch unavailable: %s", exc)
+    newly_found = await brand_media.muckrack_author_photos(to_fetch)
+    for name, url in newly_found.items():
+        for row in rows_by_name[name]:
+            row["photo_url"] = url
 
     if newly_found:
         cache.update(newly_found)

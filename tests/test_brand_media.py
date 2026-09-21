@@ -267,3 +267,59 @@ def test_resolve_slot_images_fills_a_banner_dict_that_never_declared_an_image_ke
 def test_slot_label_combines_the_tab_title_and_a_trimmed_banner_headline():
     label = brand_media._slot_label({"eyebrow": "Behaviour & Usage", "headline": "H" * 200})
     assert label == "Behaviour & Usage " + "H" * brand_media._HEADLINE_QUERY_CHARS
+
+
+def test_profile_matches_only_when_every_byline_word_is_in_the_profile_name():
+    assert brand_media.profile_matches("Kara Swisher", "Kara Swisher")
+    assert brand_media.profile_matches("Kara Swisher", "Kara A. Swisher")  # middle name is fine
+    assert not brand_media.profile_matches("DFB", "Daniel Farber-Ball")  # a handle is not a full name
+    assert not brand_media.profile_matches("Kara Swisher", "Kara Smith")
+    assert not brand_media.profile_matches("Kara Swisher", "")
+
+
+def test_looks_like_person_name_rejects_handles_brands_and_anonymous():
+    assert brand_media.looks_like_person_name("Kara Swisher")
+    for name in ("kristyg58", "Meguiars", "Anonymous", "DFB", ""):
+        assert not brand_media.looks_like_person_name(name)
+
+
+def test_is_placeholder_photo_flags_muck_racks_silhouette_and_empty_urls():
+    assert brand_media.is_placeholder_photo("https://cdn.muckrack.com/static/images/icon-user-circle.e3d7f0e7.png")
+    assert brand_media.is_placeholder_photo(None)
+    assert not brand_media.is_placeholder_photo("https://media.muckrack.com/profile/images/76/karaswisher.jpeg.128x128_q100_crop-smart.jpg")
+
+
+def test_muckrack_author_photos_only_looks_up_person_like_names():
+    seen = []
+
+    def fake_batch(names):
+        seen.extend(names)
+        return {n: "https://media.muckrack.com/x.jpg" for n in names}
+
+    saved = brand_media._lookup_muckrack_batch
+    brand_media._lookup_muckrack_batch = fake_batch
+    try:
+        result = asyncio.run(brand_media.muckrack_author_photos(["Kara Swisher", "kristyg58", "Anonymous", "Kara Swisher"]))
+    finally:
+        brand_media._lookup_muckrack_batch = saved
+    assert seen == ["Kara Swisher"]  # handles skipped, duplicate collapsed
+    assert result == {"Kara Swisher": "https://media.muckrack.com/x.jpg"}
+
+
+def test_muckrack_author_photos_never_raises_when_the_browser_fails():
+    def broken(names):
+        raise RuntimeError("no browser")
+
+    saved = brand_media._lookup_muckrack_batch
+    brand_media._lookup_muckrack_batch = broken
+    try:
+        assert asyncio.run(brand_media.muckrack_author_photos(["Kara Swisher"])) == {}
+    finally:
+        brand_media._lookup_muckrack_batch = saved
+
+
+def test_muckrack_slugs_try_the_hyphenated_form_then_the_joined_one():
+    assert brand_media._muckrack_slugs("Kara Swisher") == ["kara-swisher", "karaswisher"]
+    assert brand_media._muckrack_slugs("Walt Mossberg") == ["walt-mossberg", "waltmossberg"]
+    assert brand_media._muckrack_slugs("Cher") == ["cher"]  # one word: both forms identical
+    assert brand_media._muckrack_slugs("") == []
