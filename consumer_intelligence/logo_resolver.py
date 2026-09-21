@@ -180,9 +180,35 @@ async def resolve_logos(names: list[str], articles: list[dict]) -> dict[str, str
     return {n: _CACHE[n] for n in names if _CACHE.get(n)}
 
 
+def discover_brand_names(storyboard: dict) -> set[str]:
+    """Every value under a `brand` key anywhere in the storyboard — the field a
+    competitive-ranking table row uses (`{"brand": "NXT Wax", "share_of_voice":
+    ...}`). A ranking table often surfaces more brands than the session's
+    configured brand + competitors (every brand the dataset happens to mention),
+    so relying on the configured set alone leaves those rows showing initials
+    even when a real logo is resolvable. Deliberately scoped to the `brand` key
+    only — a generic `name` key catches too much non-brand noise (theme labels,
+    sentiment buckets)."""
+    found: set[str] = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "brand" and isinstance(value, str) and value.strip():
+                    found.add(value.strip())
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(storyboard)
+    return found
+
+
 async def refine_logos(storyboard: dict, articles: list[dict], platforms: list[str]) -> None:
     """Replace `meta.logos` with validated entries and add the source platforms'
     icons, so quote attributions ("Forums · slickdeals.net") show one too."""
     meta = storyboard.setdefault("meta", {})
-    names = [*(meta.get("logos") or {}), *platforms]
-    meta["logos"] = await resolve_logos(names, articles)
+    names = {*(meta.get("logos") or {}), *platforms, *discover_brand_names(storyboard)}
+    meta["logos"] = await resolve_logos(sorted(names), articles)

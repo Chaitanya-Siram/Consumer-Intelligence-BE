@@ -155,3 +155,14 @@ def test_run_stops_within_its_time_budget_instead_of_hanging(monkeypatch):
     report = asyncio.run(qa_agent.run(payload, [], max_iterations=5, network=False))
     assert report["timed_out"] is True
     assert report["iterations"] == 0
+
+
+def test_discover_brand_names_finds_every_brand_key_in_a_ranking_table():
+    from consumer_intelligence.logo_resolver import discover_brand_names
+
+    storyboard = {
+        "meta": {"brand": "Armor All", "logos": {}},
+        "competitive": {"rows": [{"brand": "NXT Wax", "share_of_voice": 0.9}, {"brand": "303", "share_of_voice": 0.3}]},
+        "themes": [{"name": "Gift Guide"}],  # "name" key must NOT be picked up
+    }
+    assert discover_brand_names(storyboard) == {"Armor All", "NXT Wax", "303"}

@@ -24,6 +24,7 @@ yields None and the caller moves on to Pexels.
 
 import logging
 import re
+from html import unescape
 from urllib.parse import urljoin
 
 from .narrative_client import get_vision_client
@@ -32,12 +33,21 @@ from .verbatim_capture import _PREVIEW_UA, parse_preview
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 10.0
+_RENDER_TIMEOUT_MS = 15000
 _MAX_HTML_BYTES = 400_000
 _MAX_IMAGE_BYTES = 4_000_000
 _MIN_IMAGE_BYTES = 3000  # a real hero photo, not a tracking pixel or tiny icon
 
 _YOUTUBE_ID_RX = re.compile(r"(?:youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=|shorts/)|youtu\.be/)([\w-]{6,})", re.I)
 _VIDEO_FILE_RX = re.compile(r'<(?:video|source)[^>]+src=["\']([^"\']+\.(?:mp4|webm))["\']', re.I)
+
+# A visually-classed hero <img> found in the rendered page — many storefront
+# themes (Shopify especially) inject their real banner client-side and never
+# set og:image at all, so scanning actual <img> tags after JS runs catches
+# what a plain HTTP fetch and og:image-only parsing both miss.
+_HERO_IMG_RX = re.compile(r'<img\b[^>]*?(?:class|alt)=["\'][^"\']*?(?:hero|banner|slide|feature)[^"\']*?["\'][^>]*?>', re.I)
+_IMG_SRC_RX = re.compile(r'\bsrc=["\']([^"\']+)["\']')
+_IMG_SRCSET_RX = re.compile(r'\bsrcset=["\']([^"\']+)["\']')
 
 # A homepage's own footer/header social links — the brand's *stated* accounts,
 # never a guessed handle — used as a second-tier source when the page itself
@@ -120,6 +130,44 @@ async def _twitter_avatar_hero(client, handle: str, domain: str) -> dict | None:
     return {"type": "image", "url": f"https://unavatar.io/twitter/{handle}", "source": "brand_twitter", "domain": domain}
 
 
+async def _render_html(url: str) -> str | None:
+    """The page's fully rendered HTML, after its own JS has run — a plain HTTP
+    fetch never sees client-injected content, and modern storefront themes
+    (Shopify especially) inject their real hero banner and even their own
+    og:image this way. Best-effort: no Playwright, a timeout, or a dead page
+    all fall through to og:image/og:video parsing of whatever a plain fetch got."""
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page(user_agent=_PREVIEW_UA)
+                response = await page.goto(url, wait_until="networkidle", timeout=_RENDER_TIMEOUT_MS)
+                if response is not None and response.status >= 400:
+                    return None
+                return await page.content()
+            finally:
+                await browser.close()
+    except Exception as exc:
+        logger.debug("brand_hero render failed for %s: %s", url, exc)
+        return None
+
+
+def _extract_hero_image_url(html: str, base: str) -> str | None:
+    """The first hero/banner/slide-classed <img>'s src, resolved to an
+    absolute URL. Pure — no network call. None when the page has none."""
+    for tag in _HERO_IMG_RX.findall(html):
+        match = _IMG_SRC_RX.search(tag)
+        src = match.group(1) if match else None
+        if not src:
+            match = _IMG_SRCSET_RX.search(tag)
+            src = match.group(1).split(",")[0].strip().split(" ")[0] if match else None
+        if src and not src.startswith("data:"):
+            return urljoin(base, unescape(src))  # raw markup HTML-escapes "&" as "&amp;" inside attributes
+    return None
+
+
 async def _social_hero(client, html: str, domain: str) -> dict | None:
     """A video or picture from the brand's own linked social accounts, tried
     only once the homepage itself had nothing usable."""
@@ -137,7 +185,9 @@ async def _social_hero(client, html: str, domain: str) -> dict | None:
 
 async def _scrape_site(client, domain: str) -> dict | None:
     home = f"https://{domain}/"
-    html = await _get(client, home)
+    # Render first (catches client-injected banners and og tags); a plain
+    # fetch is the fallback when Playwright itself can't reach the page.
+    html = await _render_html(home) or await _get(client, home)
     if not html:
         return None
     html = html[:_MAX_HTML_BYTES]
@@ -158,8 +208,9 @@ async def _scrape_site(client, domain: str) -> dict | None:
             return {"type": "youtube", "url": f"https://www.youtube.com/embed/{yt.group(1)}", "source": "brand_website", "domain": domain}
         return {"type": "video", "url": urljoin(home, video_url), "source": "brand_website", "domain": domain}
 
-    image_url = (preview or {}).get("image")
-    if image_url:
+    # og:image, then a heuristic scan of the rendered page's own hero/banner
+    # <img> for sites (Shopify themes especially) that never set og:image at all.
+    for image_url in filter(None, [(preview or {}).get("image"), _extract_hero_image_url(html, home)]):
         fetched = await _get(client, image_url, binary=True)
         if fetched:
             data, content_type = fetched

@@ -10,6 +10,16 @@ import asyncio
 from consumer_intelligence import brand_hero as bh
 
 
+async def _no_render(url):
+    """Every offline test below drives _scrape_site through its httpx fallback
+    (FakeClient), not a real headless browser — disable rendering globally so
+    the suite never launches Playwright or touches the network."""
+    return None
+
+
+bh._render_html = _no_render
+
+
 class FakeResp:
     def __init__(self, text="", content=b"", content_type="text/html", status_code=200):
         self.status_code = status_code
@@ -130,6 +140,48 @@ def test_scrape_site_rejects_unavatars_placeholder_svg_for_an_unknown_handle():
 def test_scrape_site_returns_none_when_the_homepage_is_unreachable():
     client = FakeClient([])  # every URL 404s
     assert asyncio.run(bh._scrape_site(client, "unreachable.example")) is None
+
+
+def test_extract_hero_image_url_finds_a_hero_classed_img_with_no_og_image():
+    html = (
+        '<div class="site-header">...</div>'
+        '<img class="hero-banner lazyload" alt="80th Anniversary" '
+        'src="//brand.example/cdn/hero.jpg?v=1" srcset="//brand.example/cdn/hero.jpg?v=1 1x">'
+    )
+    assert bh._extract_hero_image_url(html, "https://brand.example/") == "https://brand.example/cdn/hero.jpg?v=1"
+
+
+def test_extract_hero_image_url_unescapes_html_entities_in_the_src():
+    html = '<img class="hero-banner" src="/cdn/hero.jpg?v=1&amp;width=3840">'
+    assert bh._extract_hero_image_url(html, "https://brand.example/") == "https://brand.example/cdn/hero.jpg?v=1&width=3840"
+
+
+def test_extract_hero_image_url_returns_none_without_a_hero_classed_img():
+    html = '<img class="site-logo" src="/logo.png"><img class="product-thumb" src="/thumb.jpg">'
+    assert bh._extract_hero_image_url(html, "https://brand.example/") is None
+
+
+def test_scrape_site_uses_the_rendered_pages_hero_image_when_theres_no_og_image():
+    """A storefront theme that injects its real banner client-side (no
+    og:image at all) is exactly what plain HTTP fetching used to miss."""
+    real_photo = b"y" * 5000
+    rendered_html = '<img class="hero-slide" src="/cdn/hero-banner.jpg">'
+
+    async def fake_render(url):
+        return rendered_html
+
+    client = FakeClient([
+        ("https://shopify-brand.example/", FakeResp(text="<html><head></head><body>no meta tags here</body></html>")),
+        ("https://shopify-brand.example/cdn/hero-banner.jpg", FakeResp(content=real_photo, content_type="image/jpeg")),
+    ])
+    saved = bh._render_html
+    bh._render_html = fake_render
+    try:
+        result = asyncio.run(bh._scrape_site(client, "shopify-brand.example"))
+    finally:
+        bh._render_html = saved
+    assert result["type"] == "image" and result["url"] == "https://shopify-brand.example/cdn/hero-banner.jpg"
+    assert result["_bytes"] == real_photo
 
 
 def test_resolve_brand_hero_skips_the_vision_check_for_video_and_social_sources():
