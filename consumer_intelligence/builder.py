@@ -310,6 +310,10 @@ async def _build_one(
             await product_images.attach(storyboard)  # stock photo per product card
         # Real, validated logos (brands, publications, source platforms) for the FE's meta.logos registry.
         await logo_resolver.refine_logos(storyboard, articles, cohorts.platforms(articles, limit=8))
+        # Per-dimension/per-tab sub-banners (health.py's KPI cards, brand_intel.py's
+        # and trend.py's trend tabs, bci.py's section banners) — resolve_hero_media
+        # above only ever fills the lens's one top-level hero.
+        await brand_media.resolve_slot_images(storyboard, brand, (context or {}).get("category") or "")
 
     storyboard.setdefault("meta", {})["elapsed_seconds"] = round(time.time() - started, 1)
     logger.info("CI lens %s built in %.1fs", lens_key, time.time() - started)

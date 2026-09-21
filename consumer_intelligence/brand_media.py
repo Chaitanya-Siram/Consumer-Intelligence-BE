@@ -15,6 +15,7 @@ Env vars (all optional):
   PEXELS_API_KEY         — Authorization header for api.pexels.com
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -351,6 +352,70 @@ async def resolve_hero_media(query: str, *, brand: str | None = None, domain: st
         if video:
             return video
     return await pexels_photo(query)
+
+
+_SLOT_CONCURRENCY = 6
+
+
+def _slot_label(slot: dict) -> str:
+    """The most specific name a sub-banner placeholder carries, for use as
+    Pexels search context — a dimension's `name`, a trend tab's `title`, or
+    whatever label the surrounding shell gave the slot."""
+    for key in ("name", "title", "label", "headline", "eyebrow", "tag"):
+        value = slot.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+async def resolve_slot_images(storyboard: dict, brand: str, category: str) -> None:
+    """Every `{"image": None, ...}` placeholder anywhere in the storyboard —
+    a per-dimension KPI card (health.py), a per-trend tab banner (brand_intel.py,
+    trend.py), a section banner (bci.py) — gets its own Pexels photo, not just
+    the lens's single top-level hero. `resolve_hero_media` above only ever
+    touches `storyboard["hero"]`; every other banner slot these builders emit
+    was left permanently `None` with nothing downstream to fill it.
+
+    Brand + category + the slot's own label keeps the query the same
+    word-bias-safe shape as the top-level hero query: a bare brand name like
+    "Armor All" reliably pulls literal knight/military-vehicle stock photos
+    on Pexels, but adding the product category turns the same search back
+    into car-care imagery.
+
+    Mutates the storyboard in place. A slot Pexels has nothing for is simply
+    left at None, so the FE's existing gradient fallback still applies to it.
+    Never raises — a missing sub-banner photo is decoration, not a build failure.
+    """
+    slots: list[dict] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if "image" in node and node["image"] is None:
+                slots.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(storyboard)
+    if not slots:
+        return
+
+    sem = asyncio.Semaphore(_SLOT_CONCURRENCY)
+
+    async def fill(slot: dict) -> None:
+        query = " ".join(filter(None, [brand, category, _slot_label(slot)]))
+        try:
+            async with sem:
+                photo = await pexels_photo(query)
+        except Exception as exc:  # belt and braces — a sub-banner photo is decoration
+            logger.debug("slot image resolution failed for %r: %s", query, exc)
+            return
+        if photo:
+            slot["image"] = photo["url"]
+
+    await asyncio.gather(*(fill(s) for s in slots))
 
 
 # Real domains for well-known names whose naive slug is wrong — major news
