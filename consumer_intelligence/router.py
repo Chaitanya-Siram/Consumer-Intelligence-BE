@@ -30,7 +30,7 @@ from file_helpers.s3_file import s3_file
 
 from .builder import build_ci_charts, expand_lenses
 from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, resolve_ci_lenses
-from . import qa_agent
+from . import brand_hero, logo_resolver, qa_agent
 from .profile_images import PROFILE_PREFIX
 from .verbatim_capture import SCREENSHOT_PREFIX
 
@@ -218,6 +218,20 @@ async def ci_qa(session_id: int, iterations: int | None = None, db: Session = De
     report = await qa_agent.run(payload, articles, max_iterations=iterations)
     await asyncio.to_thread(_save_cache, session_id, payload)
     return report
+
+
+@router.get("/consumer-intelligence/brand-hero")
+async def brand_hero_endpoint(brand: str, domain: str | None = None) -> Any:
+    """The brand's (or a competitor's) own website/social hero — video or a
+    vision-verified image — for per-tab banners, which run in the browser and
+    can't fetch an arbitrary brand's homepage themselves (CORS). Works for any
+    name, not just the session's primary brand. `{}` when nothing usable was
+    found; the caller falls back to its own Pexels search."""
+    resolved_domain = domain or logo_resolver.candidate_domains(brand, [])
+    if isinstance(resolved_domain, list):
+        resolved_domain = next(iter(resolved_domain), None)
+    hero = await brand_hero.resolve_brand_hero(resolved_domain, brand)
+    return hero or {}
 
 
 @router.get("/consumer-intelligence/charts")

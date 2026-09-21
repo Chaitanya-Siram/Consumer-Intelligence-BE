@@ -79,6 +79,100 @@ class CINarrativeClient:
         return json.loads(text)
 
 
+_BRAND_CHECK_PROMPT = (
+    "Does this image clearly show the brand '{brand}' — its logo, packaging, "
+    "product, storefront, or another unmistakable brand mark? Reply with "
+    "exactly one word: YES or NO."
+)
+
+
+class CIVisionClient:
+    """A single yes/no vision call, reusing the same provider switch and
+    credentials as CINarrativeClient. Kept separate because none of the prose
+    call sites need image content blocks."""
+
+    async def image_shows_brand(self, image_bytes: bytes, media_type: str, brand: str) -> bool | None:
+        """True/False on a confident answer; None when the call itself failed
+        (missing key, network, rate limit) — callers should fail open rather
+        than discard a real image over an inconclusive classifier."""
+        import base64
+
+        image_b64 = base64.b64encode(image_bytes).decode()
+        try:
+            if envs.LLM_PROVIDER == "claude":
+                text = await self._call_claude(image_b64, media_type, brand)
+            else:
+                text = await self._call_azure(image_b64, media_type, brand)
+        except Exception as exc:
+            logger.info(f"Hero image brand check failed, keeping the image: {exc}")
+            return None
+        verdict = (text or "").strip().upper()
+        if verdict.startswith("Y"):
+            return True
+        if verdict.startswith("N"):
+            return False
+        return None
+
+    async def _call_claude(self, image_b64: str, media_type: str, brand: str) -> str:
+        from anthropic import AsyncAnthropic
+
+        if not envs.ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+        client = AsyncAnthropic(api_key=envs.ANTHROPIC_API_KEY)
+        response = await client.messages.create(
+            model=envs.CLAUDE_MODEL,
+            max_tokens=6,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                    {"type": "text", "text": _BRAND_CHECK_PROMPT.format(brand=brand)},
+                ],
+            }],
+        )
+        return response.content[0].text
+
+    async def _call_azure(self, image_b64: str, media_type: str, brand: str) -> str:
+        import httpx
+
+        if not envs.AZURE_OPENAI_API_KEY or not envs.AZURE_OPENAI_ENDPOINT:
+            raise RuntimeError("Azure OpenAI is not configured.")
+        api_version = getattr(envs, "AZURE_OPENAI_API_VERSION", "2024-02-01")
+        url = (
+            f"{envs.AZURE_OPENAI_ENDPOINT.rstrip('/')}/openai/deployments/"
+            f"{envs.AZURE_OPENAI_MODEL}/chat/completions?api-version={api_version}"
+        )
+        body = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _BRAND_CHECK_PROMPT.format(brand=brand)},
+                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
+                ],
+            }],
+            "max_tokens": 6,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                url,
+                headers={"Content-Type": "application/json", "api-key": envs.AZURE_OPENAI_API_KEY},
+                json=body,
+            )
+            response.raise_for_status()
+            data = response.json()
+        return data["choices"][0]["message"]["content"]
+
+
+_vision_client: CIVisionClient | None = None
+
+
+def get_vision_client() -> CIVisionClient:
+    global _vision_client
+    if _vision_client is None:
+        _vision_client = CIVisionClient()
+    return _vision_client
+
+
 _client: CINarrativeClient | None = None
 
 

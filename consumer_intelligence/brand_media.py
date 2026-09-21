@@ -336,8 +336,16 @@ async def resolve_brand_assets(brand: str, articles: list[dict]) -> dict:
     }
 
 
-async def resolve_hero_media(query: str, *, prefer_video: bool = False) -> dict | None:
-    """Pexels video (if preferred and available) else photo, else None."""
+async def resolve_hero_media(query: str, *, brand: str | None = None, domain: str | None = None, prefer_video: bool = False) -> dict | None:
+    """The brand's own homepage hero (video, or a vision-verified image) when
+    `brand`/`domain` are given; Pexels video (if preferred and available) else
+    photo otherwise or as the fallback."""
+    if domain:
+        from . import brand_hero
+
+        site_hero = await brand_hero.resolve_brand_hero(domain, brand or domain)
+        if site_hero:
+            return site_hero
     if prefer_video:
         video = await pexels_video(query)
         if video:

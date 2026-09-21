@@ -272,7 +272,10 @@ async def _build_one(
     if lens_key in _NO_HERO_MEDIA:
         with_media = False
     if with_media:
-        tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip()))
+        # Same domain guess the validated-logo pipeline trusts, so the hero banner
+        # and the brand's logo agree on which site is actually "the brand's own".
+        hero_domain = next(iter(logo_resolver.candidate_domains(brand, articles)), None)
+        tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip(), brand=brand, domain=hero_domain))
         tasks.append(brand_media.resolve_brand_assets(brand, articles))
     for section in _VERBATIM_SECTIONS.get(lens_key, ()):
         for quote_key in _QUOTE_KEYS:
