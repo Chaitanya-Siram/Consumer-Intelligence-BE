@@ -18,7 +18,7 @@ import json
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,7 @@ from file_helpers.s3_file import s3_file
 
 from .builder import build_ci_charts, expand_lenses
 from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, resolve_ci_lenses
+from .verbatim_capture import SCREENSHOT_PREFIX
 
 router = APIRouter(tags=["consumer-intelligence"])
 
@@ -162,6 +163,20 @@ def ci_lenses() -> Any:
         "coming_soon_tier1": sorted(COMING_SOON_TIER1),
         "bundles": {"brand_intelligence": ["brand_intelligence", "brand_health_storyboard", "brand_competitive_intel"]},
     }
+
+
+@router.get("/consumer-intelligence/verbatim-image")
+def verbatim_image(key: str) -> Response:
+    """Streams a server-captured "Supporting Verbatims" screenshot from S3.
+    `key` is restricted to the verbatim_capture cache prefix so this can't be
+    used to read arbitrary objects out of the bucket."""
+    if not key.startswith(SCREENSHOT_PREFIX) or ".." in key:
+        raise HTTPException(status_code=400, detail="Invalid image key.")
+    try:
+        content = s3_file.download_file(key)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Image not found.") from exc
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/consumer-intelligence/charts")

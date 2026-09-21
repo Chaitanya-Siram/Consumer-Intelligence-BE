@@ -26,6 +26,10 @@ CI_LENS_KEYS: set[str] = {
     "regional_engagement",
     "regional_brand_perception",
     "congruence_content",
+    "social_research",
+    "social_listening",
+    "social_audit",
+    "pr_research",
 }
 
 # Tier 1 keys whose backend is not yet implemented — return {"status": "coming_soon"}
@@ -54,6 +58,21 @@ TIER1_TO_LENS_KEYS: dict[str, list[str]] = {
     "regional_intelligence": ["regional_sentiment", "regional_engagement", "regional_brand_perception"],
     # AI/LLM Audit and Analysis (FE label); the lens runs an LLM audit, not a tag aggregation.
     "llm_audit": ["congruence_content"],
+    # Social Research: one lens, its Tier 2 sub-lenses (Brand Perception & Relevance,
+    # Competitive & Cultural Landscape, Occasions & Social Behaviors, Social
+    # Motivations & Identity, Cultural Spaces, Appendix) are tabs within it, not
+    # separate lens keys — see social_research.py's TABS.
+    "social_research": ["social_research"],
+    # Social Listening: single-brand, no competitor set. Same "one lens, tabs
+    # are sub-lenses" shape as Social Research.
+    "social_listening": ["social_listening"],
+    # Social Audit: single-brand, no competitor set. Three fixed research
+    # pillars (Devices, AI, Screentime) are tabs within the one lens key.
+    "social_audit": ["social_audit"],
+    # PR Research: editorial/news lens built around an early-vs-late period
+    # comparison (timeseries.halves), not a competitor set. Authors,
+    # Publications, Audience Profile are tabs within the one lens key.
+    "pr_research": ["pr_research"],
     # trend_intelligence is standalone (not a tier1 key in FE constants)
     # but included here for completeness
     "trend_intelligence": ["trend_intelligence"],

@@ -34,3 +34,7 @@ lxml-html-clean==0.4.5
 python-docx==1.2.0
 tzdata==2024.1
 tavily-python
+# Social Research "Supporting Verbatims": server-side screenshot capture for
+# posts with no public embed API. Needs `playwright install chromium` once
+# after installing requirements (not run automatically by pip).
+playwright==1.49.0

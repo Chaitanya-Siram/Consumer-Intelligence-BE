@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any, Awaitable, Callable
 
-from . import brand_media, taxonomy
+from . import brand_media, taxonomy, verbatim_capture
 from .storyboard import (
     audience_expectation,
     audience_priorities,
@@ -30,9 +30,13 @@ from .storyboard import (
     market_intel,
     network_map,
     perception,
+    pr_research,
     regional_brand_perception,
     regional_engagement,
     regional_sentiment,
+    social_audit,
+    social_listening,
+    social_research,
     trend,
     user_behaviour,
 )
@@ -63,11 +67,15 @@ _MODULES = {
     regional_engagement.LENS_KEY: regional_engagement,
     regional_brand_perception.LENS_KEY: regional_brand_perception,
     congruence_content.LENS_KEY: congruence_content,
+    social_research.LENS_KEY: social_research,
+    social_listening.LENS_KEY: social_listening,
+    social_audit.LENS_KEY: social_audit,
+    pr_research.LENS_KEY: pr_research,
 }
 
 # Lenses that count on LLM-canonicalised theme groups (taxonomy.annotate).
 # The taxonomy is computed once per build and shared across these lenses.
-_NEEDS_TAXONOMY = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY}
+_NEEDS_TAXONOMY = {emerging_issues.LENS_KEY, audience_priorities.LENS_KEY, social_research.LENS_KEY, social_listening.LENS_KEY, social_audit.LENS_KEY, pr_research.LENS_KEY}
 
 # Lenses whose module exposes `async prepare(articles, brand=, known_brands=)`
 # get its result passed to build_storyboard(prepared=...). Used for per-lens
@@ -86,6 +94,10 @@ _HAS_PREPARE = {
     regional_engagement.LENS_KEY,
     regional_brand_perception.LENS_KEY,
     congruence_content.LENS_KEY,
+    social_research.LENS_KEY,
+    social_listening.LENS_KEY,
+    social_audit.LENS_KEY,
+    pr_research.LENS_KEY,
 }
 
 # Build order: cheapest first so the client sees something quickly.
@@ -109,6 +121,10 @@ _ORDER = [
     regional_engagement.LENS_KEY,
     regional_brand_perception.LENS_KEY,
     congruence_content.LENS_KEY,
+    social_research.LENS_KEY,
+    social_listening.LENS_KEY,
+    social_audit.LENS_KEY,
+    pr_research.LENS_KEY,
 ]
 
 _BUNDLE = {brand_intel.LENS_KEY: {health.LENS_KEY, bci.LENS_KEY}}
@@ -133,9 +149,26 @@ _HERO_QUERY = {
     regional_engagement.LENS_KEY: "regional market products",
     regional_brand_perception.LENS_KEY: "regional brands map",
     congruence_content.LENS_KEY: "artificial intelligence audit",
+    social_research.LENS_KEY: "social media culture conversation",
+    social_listening.LENS_KEY: "social media conversation people talking",
+    social_audit.LENS_KEY: "children technology parenting family",
+    pr_research.LENS_KEY: "newspaper journalism editorial press",
+}
+
+# Lenses with "Supporting Verbatims" quote lists needing real evidence
+# resolution (see verbatim_capture.resolve_evidence) — {lens_key: (storyboard section keys with a `quotes` list)}.
+_VERBATIM_SECTIONS = {
+    social_research.LENS_KEY: ("brand_perception", "competitive_cultural", "occasions_behaviors", "motivations_identity", "cultural_spaces"),
+    social_listening.LENS_KEY: ("overall_expressions", "occasions_usage", "expression_deep_dive"),
+    social_audit.LENS_KEY: ("conversation_landscape", "devices", "ai", "screentime", "additional_insights"),
+    pr_research.LENS_KEY: ("editorial_analysis",),
 }
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
+# social_research/social_listening/social_audit are deliberately NOT here:
+# their hero banners want both Pexels art and brand_media.resolve_brand_assets()'s
+# logo/colors (both gated behind the same `with_media` flag), so the brand's
+# own colors can drive the screen.
 _NO_HERO_MEDIA = {
     emerging_issues.LENS_KEY,
     audience_priorities.LENS_KEY,
@@ -237,6 +270,12 @@ async def _build_one(
     if with_media:
         tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip()))
         tasks.append(brand_media.resolve_brand_assets(brand, articles))
+    for section in _VERBATIM_SECTIONS.get(lens_key, ()):
+        quotes = storyboard.get(section, {}).get("quotes")
+        if quotes:
+            tasks.append(verbatim_capture.resolve_evidence(quotes))
+    if lens_key == pr_research.LENS_KEY:
+        tasks.append(pr_research.resolve_author_photos(storyboard))
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     if with_media:

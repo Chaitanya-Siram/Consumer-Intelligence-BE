@@ -48,6 +48,14 @@ def snippet(article: dict, needles: list[str] | None = None, *, chars: int = DEF
     return text
 
 
+def truncate(text: str, chars: int = 90) -> str:
+    """Word-boundary-safe truncation with an ellipsis; never cuts mid-word."""
+    text = text or ""
+    if len(text) <= chars:
+        return text
+    return text[:chars].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
 def source(article: dict) -> str:
     """"Forums · reddit.com" / "Online News · autoblog.com" / "Review"."""
     plat = cohorts.platform(article)
