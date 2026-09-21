@@ -127,11 +127,16 @@ def _accept(name: str, data: bytes | None, domain: str, *, vector: bool = False)
     return len(owners) == 1
 
 
-async def _resolve_one(client, name: str, articles: list[dict]) -> str | None:
-    if not is_entity(name) and name.strip().lower() not in _PLATFORM_DOMAINS:
+async def _resolve_one(client, name: str, articles: list[dict], domains: dict[str, str] | None = None) -> str | None:
+    # A domain the storyboard already knows (the site an outlet was cited from)
+    # beats one guessed from its name ("CarsGuide" is carsguide.com.au), and
+    # proves the name is a real outlet even when it contains a word like "News".
+    hinted = (domains or {}).get(name)
+    if not hinted and not is_entity(name) and name.strip().lower() not in _PLATFORM_DOMAINS:
         return None
     trust_fallbacks = len(name.strip()) > _SHORT_NAME
-    for domain in candidate_domains(name, articles):
+    candidates = [hinted, *[d for d in candidate_domains(name, articles) if d != hinted]] if hinted else candidate_domains(name, articles)
+    for domain in candidates:
         url = brand_media.brandfetch_logo_url(domain)
         if url and _accept(name, await _fetch_image(client, url), domain):
             return url
@@ -154,8 +159,9 @@ async def _learn_placeholders(client) -> None:
             _PLACEHOLDERS.add(hashlib.md5(data).hexdigest())  # noqa: S324 - dedupe key only
 
 
-async def resolve_logos(names: list[str], articles: list[dict]) -> dict[str, str]:
-    """`{name: logo_url}` for every name that resolved to a real image."""
+async def resolve_logos(names: list[str], articles: list[dict], domains: dict[str, str] | None = None) -> dict[str, str]:
+    """`{name: logo_url}` for every name that resolved to a real image.
+    `domains` optionally maps a name to the site it is known to live at."""
     todo = [n for n in dict.fromkeys(n for n in names if n) if n not in _CACHE]
     if todo:
         try:
@@ -168,7 +174,7 @@ async def resolve_logos(names: list[str], articles: list[dict]) -> dict[str, str
 
                 async def one(n: str) -> None:
                     async with sem:
-                        _CACHE[n] = await _resolve_one(client, n, articles)
+                        _CACHE[n] = await _resolve_one(client, n, articles, domains)
 
                 await asyncio.gather(*(one(n) for n in todo))
         except Exception as exc:  # belt and braces — logos are decoration
@@ -211,4 +217,4 @@ async def refine_logos(storyboard: dict, articles: list[dict], platforms: list[s
     icons, so quote attributions ("Forums · slickdeals.net") show one too."""
     meta = storyboard.setdefault("meta", {})
     names = {*(meta.get("logos") or {}), *platforms, *discover_brand_names(storyboard)}
-    meta["logos"] = await resolve_logos(sorted(names), articles)
+    meta["logos"] = await resolve_logos(sorted(names), articles, meta.get("logo_domains"))

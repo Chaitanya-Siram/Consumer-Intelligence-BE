@@ -32,7 +32,7 @@ TABS = [
     {"id": "t3", "label": "Switchover Intent"},
 ]
 MIN_PRODUCTS, MAX_PRODUCTS = 4, 6
-MAX_POSTS = 3
+MAX_POSTS = 8  # "What people say": the FE shows the first few, the rest sit behind a click
 SAMPLE = 8
 
 
@@ -80,7 +80,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
             card["award_posts"] = len(award_rows)
         q = quotes.one(rows, needles=[name.split()[-1]], prefer="Positive")
         if q:
-            card["quote"] = {"text": q["text"], "source": q["source"]}
+            card["quote"] = {k: q[k] for k in ("text", "source", "url", "platform", "author", "date")}
         products.append(card)
     if len(products) < MIN_PRODUCTS:
         products_note = f"{len(products)} product(s) named often enough to card; contract asks for {MIN_PRODUCTS}-{MAX_PRODUCTS}"
@@ -131,7 +131,10 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
     for a in switching_rows[: MAX_POSTS * 4]:
         q = quotes.one([a], needles=list(aggregate.brands_in(a, known)))
         if q and str(a.get("title") or "").strip():
-            posts.append({"source": q["source"], "title": str(a.get("title")).strip()[:140], "text": q["text"]})
+            # The whole post record — link, platform, author, date — so the FE can
+            # draw the real post (the builder adds embed/screenshot/preview) and
+            # link out to it, not just its text.
+            posts.append({**q, "title": str(a.get("title")).strip()[:140]})
         if len(posts) >= MAX_POSTS:
             break
     switching = {

@@ -103,7 +103,7 @@ def _walk_quotes(node: Any):
     """Every quote dict under a list keyed `quotes*`."""
     if isinstance(node, dict):
         for key, value in node.items():
-            if key.startswith("quotes") and isinstance(value, list):
+            if (key.startswith("quotes") or key == "posts") and isinstance(value, list):
                 yield from (q for q in value if isinstance(q, dict) and q.get("text"))
             else:
                 yield from _walk_quotes(value)

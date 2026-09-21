@@ -58,6 +58,7 @@ _PEOPLE_LISTS = {
     "quotes": "author",
     "quotes_positive": "author",
     "quotes_negative": "author",
+    "posts": "author",  # Brand Perception's "What people say"
     "top_influencers": "author",
     "authors_by_reach": "name",
     "authors_by_volume": "name",

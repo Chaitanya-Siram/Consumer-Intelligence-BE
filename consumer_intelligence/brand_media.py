@@ -185,6 +185,39 @@ def profile_matches(name: str, profile_name: str) -> bool:
     return len(wanted) >= 2 and set(wanted) <= set(_name_tokens(profile_name))
 
 
+async def resolve_muckrack_photos(rows_by_name: dict[str, list[dict]]) -> None:
+    """Set `photo_url` on every row whose byline has a real Muck Rack headshot,
+    mutating the rows in place. The one implementation behind every lens that
+    lists journalists (PR Research authors, Congruence's reporter influence).
+
+    Deduplicated by name and served from the shared cache (a name only ever has
+    to clear Cloudflare once, across every session); only reporter-like bylines
+    are looked up, and only a profile whose own name matches is used — see
+    `looks_like_person_name`, `profile_matches`. Never raises."""
+    if not rows_by_name:
+        return
+    cache = load_author_photo_cache()
+    to_fetch = []
+    for name, rows in rows_by_name.items():
+        if not looks_like_person_name(name):
+            continue
+        cached_url = cache.get(name)
+        if cached_url and not is_placeholder_photo(cached_url):
+            for row in rows:
+                row["photo_url"] = cached_url
+        else:
+            to_fetch.append(name)
+    if not to_fetch:
+        return
+    found = await muckrack_author_photos(to_fetch)
+    for name, url in found.items():
+        for row in rows_by_name[name]:
+            row["photo_url"] = url
+    if found:
+        cache.update(found)
+        save_author_photo_cache(cache)
+
+
 def _muckrack_slugs(name: str) -> list[str]:
     """Profile URL slugs to try, most common first: Muck Rack canonicalises
     some names hyphenated ("kara-swisher" redirects) and others joined
@@ -531,6 +564,14 @@ _KNOWN_DOMAINS = {
     "twitter/x": "x.com",
     "twitter": "x.com",
     "x": "x.com",
+    # AI assistants (the Congruence lens's "Cited by" chips): the naive slug for
+    # "Claude" or "Gemini" is an unrelated company's site.
+    "chatgpt": "chatgpt.com",
+    "claude": "claude.ai",
+    "gemini": "gemini.google.com",
+    "perplexity": "perplexity.ai",
+    "copilot": "copilot.microsoft.com",
+    "grok": "grok.com",
 }
 
 

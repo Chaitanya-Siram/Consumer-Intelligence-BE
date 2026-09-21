@@ -253,29 +253,4 @@ async def resolve_author_photos(storyboard: dict) -> None:
         for row in [*period.get("authors_by_reach", []), *period.get("authors_by_volume", [])]:
             rows_by_name.setdefault(row["name"], []).append(row)
 
-    if not rows_by_name:
-        return
-
-    cache = brand_media.load_author_photo_cache()
-    to_fetch = []
-    for name, rows in rows_by_name.items():
-        if not brand_media.looks_like_person_name(name):
-            continue
-        cached_url = cache.get(name)
-        if cached_url and not brand_media.is_placeholder_photo(cached_url):
-            for row in rows:
-                row["photo_url"] = cached_url
-        else:
-            to_fetch.append(name)
-
-    if not to_fetch:
-        return
-
-    newly_found = await brand_media.muckrack_author_photos(to_fetch)
-    for name, url in newly_found.items():
-        for row in rows_by_name[name]:
-            row["photo_url"] = url
-
-    if newly_found:
-        cache.update(newly_found)
-        brand_media.save_author_photo_cache(cache)
+    await brand_media.resolve_muckrack_photos(rows_by_name)

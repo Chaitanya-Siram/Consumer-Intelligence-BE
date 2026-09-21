@@ -24,7 +24,7 @@ from ..audit_classify import label_responses, propose_pillars
 LENS_KEY = "congruence_content"
 PREPARE_KEY = "llm_audit"
 PREPARE_ACCEPTS_CONTEXT = True   # builder passes session_id= and refresh= to prepare()
-__all__ = ["LENS_KEY", "PREPARE_KEY", "PREPARE_ACCEPTS_CONTEXT", "build_storyboard", "prepare"]
+__all__ = ["LENS_KEY", "PREPARE_KEY", "PREPARE_ACCEPTS_CONTEXT", "build_storyboard", "prepare", "resolve_journalist_photos"]
 
 TABS = [
     {"id": "t1", "label": "Overview"},
@@ -47,8 +47,34 @@ OUTCOMES = [
 ]
 TOP_SOURCES = 10
 TOP_JOURNALISTS = 8
+SOURCE_TYPE_ICONS = 3  # outlet icons shown beside each source type
 ALIGNED_MIN, DILUTED_MIN, CONTRADICT_SHARE = 60, 30, 25
 SOCIAL_GAP_LLM_MIN, SOCIAL_GAP_SOCIAL_MAX = 20, 2
+
+
+_GENERIC_BYLINE_START = ("staff", "editor", "team", "the ", "contributor", "guest ")
+_GENERIC_BYLINE_END = (" staff", " editors", " editor", " team", " desk", " newsroom", " contributors")
+
+
+def _is_generic_byline(name: str) -> bool:
+    """A byline that names a newsroom, not a person ("Autoblog Staff",
+    "The Editors"): it is no journalist to rank or to look a photo up for."""
+    lowered = name.lower().strip()
+    return lowered.startswith(_GENERIC_BYLINE_START) or lowered.endswith(_GENERIC_BYLINE_END)
+
+
+_BYLINE_SPLIT_RX = re.compile(r"\s*(?:,|;|&|\band\b)\s*", re.I)
+
+
+def _split_bylines(author: str) -> list[str]:
+    """One name per journalist in a byline. "Collin Morgan, Brian Silvestro" is
+    two people, but it is split only when every part is itself a full name, so
+    a "Last, First" byline is left whole rather than cut into two fragments."""
+    author = re.sub(r"\s+", " ", str(author or "")).strip()
+    parts = [p.strip() for p in _BYLINE_SPLIT_RX.split(author) if p.strip()]
+    if len(parts) > 1 and all(" " in p for p in parts):
+        return parts
+    return [author] if author else []
 
 
 def _slug(text: str) -> str:
@@ -87,6 +113,17 @@ def _net(labels: list[dict]) -> int | None:
     return round((pos - neg) * 100 / len(labels))
 
 
+async def resolve_journalist_photos(storyboard: dict) -> None:
+    """Real Muck Rack headshots for the "Journalist / reporter influence" table
+    (`analysis.journalists`), set as each row's `photo_url`. Best-effort: a
+    journalist with no matching profile keeps the FE's initials avatar."""
+    rows = (storyboard.get("analysis") or {}).get("journalists") or []
+    by_name: dict[str, list[dict]] = {}
+    for row in rows:
+        by_name.setdefault(row["name"], []).append(row)
+    await brand_media.resolve_muckrack_photos(by_name)
+
+
 def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str], prepared: dict | None = None) -> dict:
     known = known_brands or ([brand] if brand else [])
     competitors = [k for k in known if k.lower() != (brand or "").lower()]
@@ -118,14 +155,28 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         name = Counter(c["outlet"] for c in rows).most_common(1)[0][0]
         sources.append({"name": name, "domain": d, "type": Counter(c["type"] for c in rows).most_common(1)[0][0], "mentions": len(rows), "llms": sorted({c["llm"] for c in rows}, key=lambda x: llms.index(x) if x in llms else 99)})
     type_counts = Counter(c["type"] for c in cite_rows)
-    source_types = [{"name": r["name"], "pct": r["pct"]} for r in cohorts.pct_rows(dict(type_counts))] if cite_rows else []
+    # Each type carries its most-cited outlets — from every citation, not just the
+    # top-ranked ones — so the FE can show their domain icons beside the label
+    # ("News & trade press" is a category, not a brand).
+    domain_outlet = {d: Counter(c["outlet"] for c in rows).most_common(1)[0][0] for d, rows in by_domain.items()}
+    domains_by_type: dict[str, Counter] = defaultdict(Counter)
+    for c in cite_rows:
+        domains_by_type[c["type"]][c["domain"]] += 1
+    type_outlets = {
+        t: [(domain_outlet[d], d) for d, _ in counts.most_common(SOURCE_TYPE_ICONS)]
+        for t, counts in domains_by_type.items()
+    }
+    source_types = [
+        {"name": r["name"], "pct": r["pct"], "sources": [name for name, _ in type_outlets.get(r["name"], [])]}
+        for r in cohorts.pct_rows(dict(type_counts))
+    ] if cite_rows else []
     top5 = sum(len(by_domain[d]) for d in ranked_domains[:5])
     journalists = []
     by_author: dict[str, list[dict]] = defaultdict(list)
     for c in cite_rows:
-        a = re.sub(r"\s+", " ", c["author"]).strip()
-        if len(a) >= 5 and " " in a and not a.lower().startswith(("staff", "editor", "team")):
-            by_author[a.title()].append(c)
+        for a in _split_bylines(c["author"]):
+            if len(a) >= 5 and " " in a and not _is_generic_byline(a):
+                by_author[a.title()].append(c)
     for a in sorted(by_author, key=lambda k: (-len(by_author[k]), k))[:TOP_JOURNALISTS]:
         rows = by_author[a]
         journalists.append({"name": a, "outlet": Counter(r["outlet"] for r in rows).most_common(1)[0][0], "mentions": len(rows), "beat": "", "headlines": [r["title"] for r in rows if r["title"]][:4]})
@@ -292,11 +343,20 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "outcomes": OUTCOMES,
     }
     modes = Counter(r.get("citation_mode", "model-claimed") for r in responses)
-    logos = brand_media.brand_logos([brand], articles)
+    logos = brand_media.brand_logos([brand, *llms], articles)  # the assistants too: the "Cited by" chips
     for s in sources:
         url = brand_media.brandfetch_logo_url(s["domain"])
         if url:
             logos[s["name"]] = url
+    # The site each outlet was actually cited from, so logo validation tries
+    # that domain first instead of guessing one from the outlet's name.
+    logo_domains = {s["name"]: s["domain"] for s in sources if s.get("domain")}
+    for outlets in type_outlets.values():  # the source-type icons' outlets, ranked or not
+        for name, domain in outlets:
+            logo_domains.setdefault(name, domain)
+            url = brand_media.brandfetch_logo_url(domain)
+            if url:
+                logos.setdefault(name, url)
 
     return {
         "meta": {
@@ -314,6 +374,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
             "assistants_unavailable": run.get("unavailable", {}),
             "pillars_source": run.get("pillars_source"),
             "logos": logos,
+            "logo_domains": logo_domains,
             "classification": {"labels": (prepared.get("labels") or {}).get("method"), "themes": theme_meta.get("method"), "errors": {k: len(v) for k, v in (run.get("errors") or {}).items()}},
         },
         "tabs": [dict(t) for t in TABS],

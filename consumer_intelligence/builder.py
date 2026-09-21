@@ -162,10 +162,11 @@ _VERBATIM_SECTIONS = {
     social_listening.LENS_KEY: ("overall_expressions", "occasions_usage", "expression_deep_dive"),
     social_audit.LENS_KEY: ("conversation_landscape", "devices", "ai", "screentime", "additional_insights"),
     pr_research.LENS_KEY: ("editorial_analysis",),
+    brand_perception.LENS_KEY: ("switching",),  # "What people say": real posts, not just their text
 }
 
 # Keys under a verbatim section that hold a quote list (PR Research splits by tone).
-_QUOTE_KEYS = ("quotes", "quotes_positive", "quotes_negative")
+_QUOTE_KEYS = ("quotes", "quotes_positive", "quotes_negative", "posts")
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
 # social_research/social_listening/social_audit are deliberately NOT here:
@@ -290,6 +291,8 @@ async def _build_one(
                 tasks.append(verbatim_capture.resolve_evidence(quotes))
     if lens_key == pr_research.LENS_KEY:
         tasks.append(pr_research.resolve_author_photos(storyboard))
+    if lens_key == congruence_content.LENS_KEY:
+        tasks.append(congruence_content.resolve_journalist_photos(storyboard))
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     if with_media:
@@ -310,6 +313,8 @@ async def _build_one(
             await product_images.attach(storyboard)  # stock photo per product card
         # Real, validated logos (brands, publications, source platforms) for the FE's meta.logos registry.
         await logo_resolver.refine_logos(storyboard, articles, cohorts.platforms(articles, limit=8))
+        if lens_key == brand_intel.LENS_KEY:
+            await brand_intel.resolve_leader_media(storyboard, articles)  # official-channel video per leader card
         # Per-dimension/per-tab sub-banners (health.py's KPI cards, brand_intel.py's
         # and trend.py's trend tabs, bci.py's section banners) — resolve_hero_media
         # above only ever fills the lens's one top-level hero.
