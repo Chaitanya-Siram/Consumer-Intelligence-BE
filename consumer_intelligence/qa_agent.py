@@ -16,6 +16,12 @@ What it checks, and the fallback ladder used to repair each:
   post link       http(s) only; a missing link is recovered from the article
   images          preview image, product photo, screenshot object and profile
                   picture must exist; a broken one is dropped or re-fetched
+  banner media    every resolved dimension card / tab / section banner photo
+                  and hero/leader-card media (health.py, brand_intel.py,
+                  trend.py, bci.py) must actually load; a dead one is
+                  re-resolved through the same DuckDuckGo-then-Pexels chain
+                  that filled it, or cleared so the FE's gradient fallback
+                  applies instead of shipping a link that never renders
   profile pictures  every person row the FE draws a face for (quote cards, PR
                   authors, influencers): a stored picture must be a real image
                   the endpoint can serve; a broken one is dropped and re-fetched,
@@ -209,6 +215,45 @@ async def _audit_people(ctx: _Context, lens: str, storyboard: dict) -> list[Issu
     return found
 
 
+def _walk_media_slots(node: object):
+    """Every resolved banner/dimension/leader photo anywhere in the storyboard
+    — the two shapes `resolve_slot_images`/`resolve_hero_media`/
+    `brand_intel.resolve_leader_media` fill: a bare `image` URL string
+    (dimension cards, tab/section banners) and a `{"type": "image", "url":
+    ...}` media object (the hero, brand_intel's leader cards; a video/youtube
+    media is left alone here, it isn't drawn as a still photo). Yields
+    `(shape, container, url)` so a repair can write back to the right key.
+    Product photos (`{"image": {...}}`) and quote preview images
+    (`preview.image`) are different shapes, audited separately."""
+    if isinstance(node, dict):
+        image = node.get("image")
+        if isinstance(image, str) and image:
+            yield ("image", node, image)
+        media = node.get("media")
+        if isinstance(media, dict) and media.get("type") == "image":
+            url = media.get("url")
+            if isinstance(url, str) and url:
+                yield ("media", node, url)
+        for value in node.values():
+            yield from _walk_media_slots(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk_media_slots(value)
+
+
+async def _audit_media(ctx: _Context, lens: str, storyboard: dict) -> list[Issue]:
+    """Every resolved banner/dimension/hero/leader photo must actually load —
+    the same class of bug as a broken quote preview image (`_audit_quote`),
+    but for the storyboard's own decorative art rather than a scraped post."""
+    found: list[Issue] = []
+    for shape, container, url in _walk_media_slots(storyboard):
+        if ctx.network and not await _is_reachable(ctx, url):
+            label = brand_media._slot_label(container) or url[:40]  # noqa: SLF001
+            ref = f"{shape}|{label}|{id(container)}"
+            found.append(Issue(lens, "slot_image_broken", ref, f"{label!r} banner image does not load", True, (shape, container)))
+    return found
+
+
 def _audit_logos(ctx: _Context, lens: str, storyboard: dict) -> list[Issue]:
     meta = storyboard.get("meta") or {}
     logos = meta.get("logos")
@@ -250,6 +295,7 @@ async def audit(ctx: _Context) -> list[Issue]:
         for quote in _walk_quotes(storyboard):
             issues += await _audit_quote(ctx, lens, quote)
         issues += await _audit_people(ctx, lens, storyboard)
+        issues += await _audit_media(ctx, lens, storyboard)
         issues += _audit_logos(ctx, lens, storyboard) + _audit_products(lens, storyboard) + _audit_prose(lens, storyboard)
     return issues
 
@@ -338,6 +384,32 @@ async def _fix_avatar_broken(ctx: _Context, issue: Issue) -> bool:
     return True  # dropping the broken key is itself the repair
 
 
+async def _fix_slot_image(ctx: _Context, issue: Issue) -> bool:
+    """Re-resolve a banner/dimension/hero/leader photo that stopped loading —
+    the same DuckDuckGo-then-Pexels chain (`stock_photo`) that filled it the
+    first time, now gated by `brand_media._url_is_live` before a URL is ever
+    handed back. The dead link's own query is evicted from `_STOCK_CACHE`
+    first — otherwise a repair would just get the same cached dead URL back.
+    Nothing live found: clear the slot so the FE's gradient/hidden-media
+    fallback applies cleanly, exactly as an unfilled slot already does — a
+    repaired slot is never worse than one `resolve_slot_images` never filled."""
+    shape, container = issue.target
+    storyboard = ctx.payload.get(issue.lens) or {}
+    meta = storyboard.get("meta") or {}
+    brand = meta.get("brand") or (ctx.payload.get("meta") or {}).get("brand") or ""
+    category = meta.get("category") or ""
+    query = " ".join(filter(None, [brand, category, brand_media._slot_label(container)]))  # noqa: SLF001
+    photo = None
+    if query:
+        brand_media._STOCK_CACHE.pop(query, None)  # noqa: SLF001 - evict the dead hit before retrying
+        photo = await brand_media.stock_photo(query)
+    if shape == "image":
+        container["image"] = photo["url"] if photo else None
+    else:
+        container["media"] = photo if photo else None
+    return True  # clearing (or replacing) the dead link is itself the repair
+
+
 async def _fix_logo_junk(ctx: _Context, issue: Issue) -> bool:
     return issue.target["meta"]["logos"].pop(issue.ref, None) is not None
 
@@ -378,6 +450,7 @@ _REPAIRS: dict[str, Callable[[_Context, Issue], Awaitable[bool]]] = {
     "preview_image_broken": _fix_preview_image,
     "avatar_missing": _fix_avatar,
     "avatar_broken": _fix_avatar_broken,
+    "slot_image_broken": _fix_slot_image,
     "logo_junk": _fix_logo_junk,
     "logo_missing": _fix_logo_missing,
     "product_image_missing": _fix_product_image,
