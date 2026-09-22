@@ -14,6 +14,7 @@ table has no CI column and existing models must not change.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -64,7 +65,41 @@ def _cached_lenses(cached: dict | None) -> set[str]:
     }
 
 
-def _plan(session_id: int, nodes: list[dict], requested: list[str] | None, refresh: bool) -> tuple[dict | None, list[str], set[str] | None, list[str]]:
+def _fingerprint(record, articles: list[dict]) -> str:
+    """Identity of the data a CI payload was built from. The cache is keyed by
+    session id alone, and ids get reused (a session deleted and recreated, a
+    database restored from another environment), so a payload is only reusable
+    when it came from this session record and these article rows."""
+    ids = sorted(str(a.get("id") or a.get("url") or "") for a in articles)
+    approved = sum(1 for a in articles if a.get("is_approved_for_dashboards"))
+    parts = [
+        str(getattr(record, "created_at", "") or ""),
+        json.dumps(getattr(record, "brand_keywords", None) or [], sort_keys=True),
+        json.dumps(getattr(record, "competitor_keywords", None) or [], sort_keys=True),
+        str(len(ids)),
+        str(approved),
+        ",".join(ids),
+    ]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _cache_matches(cached: dict | None, fingerprint: str, session_id: int) -> dict | None:
+    """`cached` when it was built from the same data, else None (forces a full
+    rebuild). A cache written before fingerprints existed carries no `meta.source`
+    and is treated as stale too: one rebuild, then it is stamped."""
+    if not isinstance(cached, dict):
+        return None
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    if meta.get("source") == fingerprint:
+        return cached
+    logger.warning(
+        "CI cache for session_id=%s was built from different data (source %s, now %s); rebuilding",
+        session_id, (meta.get("source") or "none")[:12], fingerprint[:12],
+    )
+    return None
+
+
+def _plan(session_id: int, nodes: list[dict], requested: list[str] | None, refresh: bool, fingerprint: str | None = None) -> tuple[dict | None, list[str], set[str] | None, list[str]]:
     """(cached_payload, required_lenses, lenses_to_skip, lenses_to_build).
 
     Without refresh: build only required lenses absent from the cache.
@@ -72,6 +107,8 @@ def _plan(session_id: int, nodes: list[dict], requested: list[str] | None, refre
     requested (so `?lenses=x&refresh=true` refreshes x without dropping the rest).
     """
     cached = _load_cache(session_id)
+    if fingerprint is not None:
+        cached = _cache_matches(cached, fingerprint, session_id)
     required = _required_lenses(nodes, requested)
     have = _cached_lenses(cached)
     if refresh:
@@ -132,6 +169,14 @@ def _load_cache(session_id: int) -> dict | None:
         return json.loads(raw, parse_constant=lambda _: None) if raw else None
     except Exception:
         return None
+
+
+def _stamp_source(payload: dict, fingerprint: str | None) -> None:
+    """Record which session record + article rows this payload came from."""
+    if fingerprint and isinstance(payload, dict):
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        meta["source"] = fingerprint
+        payload["meta"] = meta
 
 
 def _save_cache(session_id: int, payload: dict) -> None:
@@ -300,11 +345,12 @@ async def ci_charts(
     # Incremental cache: return the cached payload only when it already holds
     # every lens this session needs; otherwise build just the missing ones.
     # `refresh` rebuilds the required lenses but keeps other cached lenses.
-    cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh)
+    tagged_articles = _articles_for_charts(db, session_id)
+    fingerprint = _fingerprint(record, tagged_articles)
+    cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh, fingerprint)
     if cached and not missing:
         return cached
 
-    tagged_articles = _articles_for_charts(db, session_id)
     if not tagged_articles:
         if cached:
             return cached
@@ -316,7 +362,7 @@ async def ci_charts(
     key = (session_id, tuple(missing))
     task = _inflight.get(key)
     if task is None:
-        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, record, with_media, skip, cached, missing, refresh=refresh))
+        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, record, with_media, skip, cached, missing, refresh=refresh, fingerprint=fingerprint))
         _inflight[key] = task
         task.add_done_callback(lambda _t, _k=key: _inflight.pop(_k, None))
     else:
@@ -333,7 +379,7 @@ async def ci_charts(
 _inflight: dict[tuple, asyncio.Task] = {}
 
 
-async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, with_media, skip, cached, missing, refresh: bool = False) -> dict:
+async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, with_media, skip, cached, missing, refresh: bool = False, fingerprint: str | None = None) -> dict:
     started = time.time()
     payload = await build_ci_charts(
         workflow_nodes=nodes,
@@ -348,6 +394,7 @@ async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, w
         category=_session_category(record),
     )
     response = jsonable_encoder(_merge_payload(cached, payload))
+    _stamp_source(response, fingerprint)
     _save_cache(session_id, response)
     logger.info("CI charts generated for session_id=%s (%s) in %.1fs", session_id, ",".join(missing), time.time() - started)
     return response
@@ -384,12 +431,13 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             return
 
         nodes = _workflow_nodes(record)
-        cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh)
+        tagged_articles = _articles_for_charts(db, session_id)
+        fingerprint = _fingerprint(record, tagged_articles)
+        cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh, fingerprint)
         if cached and not missing:
             await websocket.send_json({"type": "complete", "cached": True, "charts_data": cached})
             return
 
-        tagged_articles = _articles_for_charts(db, session_id)
         if not tagged_articles:
             if cached:
                 await websocket.send_json({"type": "complete", "cached": True, "charts_data": cached})
@@ -418,6 +466,7 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             category=_session_category(record),
         )
         response = jsonable_encoder(_merge_payload(cached, payload))
+        _stamp_source(response, fingerprint)
         _save_cache(session_id, response)
         await emit(
             {
