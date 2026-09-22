@@ -162,10 +162,11 @@ _VERBATIM_SECTIONS = {
     social_listening.LENS_KEY: ("overall_expressions", "occasions_usage", "expression_deep_dive"),
     social_audit.LENS_KEY: ("conversation_landscape", "devices", "ai", "screentime", "additional_insights"),
     pr_research.LENS_KEY: ("editorial_analysis",),
+    brand_perception.LENS_KEY: ("switching",),  # "What people say": real posts, not just their text
 }
 
 # Keys under a verbatim section that hold a quote list (PR Research splits by tone).
-_QUOTE_KEYS = ("quotes", "quotes_positive", "quotes_negative")
+_QUOTE_KEYS = ("quotes", "quotes_positive", "quotes_negative", "posts")
 
 # Lenses whose screens carry their own hero art; skip Pexels for them.
 # social_research/social_listening/social_audit are deliberately NOT here:
@@ -272,7 +273,16 @@ async def _build_one(
     if lens_key in _NO_HERO_MEDIA:
         with_media = False
     if with_media:
-        tasks.append(brand_media.resolve_hero_media(f"{brand} {_HERO_QUERY[lens_key]}".strip()))
+        # Same domain guess the validated-logo pipeline trusts, so the hero banner
+        # and the brand's logo agree on which site is actually "the brand's own".
+        hero_domain = next(iter(logo_resolver.candidate_domains(brand, articles)), None)
+        # The category disambiguates a brand name that is also an ordinary word —
+        # "Armor All" alone (or paired with an abstract topic like "narratives")
+        # reliably pulls literal knight/military-vehicle stock photos on Pexels;
+        # adding "Car care products" turns the same search back into car-care imagery.
+        hero_category = (context or {}).get("category") or ""
+        hero_query = " ".join(filter(None, [brand, hero_category, _HERO_QUERY[lens_key]]))
+        tasks.append(brand_media.resolve_hero_media(hero_query, brand=brand, domain=hero_domain))
         tasks.append(brand_media.resolve_brand_assets(brand, articles))
     for section in _VERBATIM_SECTIONS.get(lens_key, ()):
         for quote_key in _QUOTE_KEYS:
@@ -281,6 +291,8 @@ async def _build_one(
                 tasks.append(verbatim_capture.resolve_evidence(quotes))
     if lens_key == pr_research.LENS_KEY:
         tasks.append(pr_research.resolve_author_photos(storyboard))
+    if lens_key == congruence_content.LENS_KEY:
+        tasks.append(congruence_content.resolve_journalist_photos(storyboard))
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     if with_media:
@@ -301,6 +313,12 @@ async def _build_one(
             await product_images.attach(storyboard)  # stock photo per product card
         # Real, validated logos (brands, publications, source platforms) for the FE's meta.logos registry.
         await logo_resolver.refine_logos(storyboard, articles, cohorts.platforms(articles, limit=8))
+        if lens_key == brand_intel.LENS_KEY:
+            await brand_intel.resolve_leader_media(storyboard, articles)  # official-channel video per leader card
+        # Per-dimension/per-tab sub-banners (health.py's KPI cards, brand_intel.py's
+        # and trend.py's trend tabs, bci.py's section banners) — resolve_hero_media
+        # above only ever fills the lens's one top-level hero.
+        await brand_media.resolve_slot_images(storyboard, brand, (context or {}).get("category") or "")
 
     storyboard.setdefault("meta", {})["elapsed_seconds"] = round(time.time() - started, 1)
     logger.info("CI lens %s built in %.1fs", lens_key, time.time() - started)

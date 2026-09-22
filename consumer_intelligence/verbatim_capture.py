@@ -234,6 +234,9 @@ _PREVIEW_KEYS = {
     "og:image": "image",
     "twitter:image": "image",
     "og:site_name": "site",
+    "og:video": "video",
+    "og:video:url": "video",
+    "og:video:secure_url": "video",
 }
 _PREVIEW_MAX_BYTES = 400_000
 

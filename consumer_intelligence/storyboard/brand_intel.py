@@ -1,14 +1,18 @@
 """Brand Intelligence storyboard — news-article adaptation.
 
 Port of ConsumerIntelligence_PR/backend/app/charts/storyboard/brand_intel.py.
-Adaptation: brand_media module removed (media=None always), no imagery resolver.
-Brandfetch logo URL added to leader cards via article domain extraction.
+Brandfetch logo URL added to leader cards via article domain extraction. Each
+leader card's `media` starts empty and is filled by `resolve_leader_media`.
 """
 
+import asyncio
+import logging
 import re
 
 from .. import aggregate
 from .. import brand_media
+
+logger = logging.getLogger(__name__)
 
 LENS_KEY = "brand_intelligence"
 
@@ -19,6 +23,7 @@ VERBATIM_CHARS = 260
 MIN_THEME_VOLUME = 3
 GROWTH_CAP = 300
 GROWTH_MIN_VOLUME = 10
+_MEDIA_CONCURRENCY = 4
 
 
 def _fmt(n: float) -> str:
@@ -102,6 +107,45 @@ def _sentiment_split(articles: list[dict]) -> list[dict]:
         n = sum(1 for a in rated if a["sentiment"] == label)
         rows.append({"label": label, "pct": round(n * 100 / total), "tone": tone, "count": n})
     return [r for r in rows if r["tone"] != "neu" or r["count"]]
+
+
+async def resolve_leader_media(storyboard: dict, articles: list[dict]) -> None:
+    """Fill every "Brands Leading This Space" card's `media`, in place. Per card,
+    most specific first:
+
+      1. a video from the brand's own official YouTube channel whose title
+         matches the tab's label (brand_video) — the channel its website links to
+      2. the brand's own homepage hero (brand_hero: video or a vision-checked image)
+      3. a stock photo for "brand + label" (DuckDuckGo, then Pexels)
+
+    A card no source has anything for keeps `media: None`. Never raises."""
+    from .. import brand_hero, brand_video, logo_resolver
+
+    sem = asyncio.Semaphore(_MEDIA_CONCURRENCY)
+
+    async def fill(item: dict, label: str) -> None:
+        name = item.get("name") or ""
+        domain = next(iter(logo_resolver.candidate_domains(name, articles)), None)
+        try:
+            async with sem:
+                media = await brand_video.leader_video(domain, label, name)
+                if not media:
+                    media = await brand_hero.resolve_brand_hero(domain, name) if domain else None
+                if not media:
+                    media = await brand_media.stock_photo(f"{name} {label}")
+        except Exception as exc:  # decoration: a card without media still renders
+            logger.debug("leader media failed for %s: %s", name, exc)
+            return
+        if media:
+            item["media"] = media
+
+    jobs = [
+        fill(item, str(tab.get("label") or ""))
+        for tab in storyboard.get("tabs") or []
+        for item in (tab.get("leaders") or {}).get("items") or []
+        if isinstance(item, dict) and not item.get("media")
+    ]
+    await asyncio.gather(*jobs)
 
 
 def _extract_domain(brand_name: str, articles: list[dict]) -> str | None:

@@ -15,10 +15,11 @@ table has no CI column and existing models must not change.
 
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 
@@ -30,7 +31,7 @@ from file_helpers.s3_file import s3_file
 
 from .builder import build_ci_charts, expand_lenses
 from .tier_registry import CI_LENS_KEYS, COMING_SOON_TIER1, TIER1_TO_LENS_KEYS, resolve_ci_lenses
-from . import qa_agent
+from . import brand_hero, brand_media, logo_resolver, qa_agent, qa_render
 from .profile_images import PROFILE_PREFIX
 from .verbatim_capture import SCREENSHOT_PREFIX
 
@@ -218,6 +219,60 @@ async def ci_qa(session_id: int, iterations: int | None = None, db: Session = De
     report = await qa_agent.run(payload, articles, max_iterations=iterations)
     await asyncio.to_thread(_save_cache, session_id, payload)
     return report
+
+
+@router.post("/consumer-intelligence/qa/render")
+async def ci_qa_render(session_id: int, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> Any:
+    """Open the session's poster-picture dashboards in a real browser and report
+    whether the pictures and logos actually rendered (see qa_render.py). Runs as
+    the caller: their own bearer token is what the browser is given. Only the
+    configured frontend (FRONTEND_URL) is ever opened — never a caller-supplied
+    address, which would hand their token to it."""
+    record = get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="A bearer token is required.")
+    payload = _load_cache(session_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="No generated dashboard for this session yet.")
+    report = await qa_render.check_rendering(
+        payload,
+        frontend_url=os.getenv("FRONTEND_URL", "http://localhost:3000"),
+        project_id=record.project_id,
+        session_id=session_id,
+        token=token,
+    )
+    payload.setdefault("meta", {}).setdefault("qa", {})["render"] = report
+    await asyncio.to_thread(_save_cache, session_id, payload)
+    return report
+
+
+@router.get("/consumer-intelligence/brand-hero")
+async def brand_hero_endpoint(brand: str, domain: str | None = None) -> Any:
+    """The brand's (or a competitor's) own website/social hero — video or a
+    vision-verified image — for per-tab banners, which run in the browser and
+    can't fetch an arbitrary brand's homepage themselves (CORS). Works for any
+    name, not just the session's primary brand. `{}` when nothing usable was
+    found; the caller falls back to its own Pexels search."""
+    resolved_domain = domain or logo_resolver.candidate_domains(brand, [])
+    if isinstance(resolved_domain, list):
+        resolved_domain = next(iter(resolved_domain), None)
+    hero = await brand_hero.resolve_brand_hero(resolved_domain, brand)
+    return hero or {}
+
+
+@router.get("/consumer-intelligence/stock-image")
+async def stock_image_endpoint(query: str) -> Any:
+    """DuckDuckGo-then-Pexels photo for an arbitrary `query` — the same
+    resolver every dashboard banner uses (see `brand_media.stock_photo`),
+    exposed directly for callers with no session/brand context of their own,
+    such as the workflow builder's lens/sub-lens picker cards, which run in
+    the browser and can't reach either provider themselves (CORS/API key).
+    `{}` when nothing usable was found."""
+    photo = await brand_media.stock_photo(query)
+    return photo or {}
 
 
 @router.get("/consumer-intelligence/charts")

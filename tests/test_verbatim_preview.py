@@ -140,6 +140,73 @@ def test_evidence_issues_are_repaired_in_one_batched_capture_pass(monkeypatch):
     assert report["fixed"].get("evidence_upgradable") == 4
 
 
+def test_walk_media_slots_finds_banner_and_hero_images_but_skips_products_and_video():
+    from consumer_intelligence.qa_agent import _walk_media_slots
+
+    storyboard = {
+        "hero": {"media": {"type": "image", "url": "https://x.example.com/hero.jpg"}},
+        "dimensions": [{"key": "trust", "image": "https://x.example.com/trust.jpg"}],
+        "tabs": [{"banner": {"title": "T1", "image": None}}],  # unresolved slot: not yet a candidate
+        "leaders": {"items": [{"media": {"type": "youtube", "url": "https://youtube.com/embed/1"}}]},  # video, skipped
+        "perception": {"products": [{"name": "Wipes", "image": {"url": "https://x.example.com/product.jpg"}}]},  # dict shape, skipped
+    }
+    found = [(shape, url) for shape, _container, url in _walk_media_slots(storyboard)]
+    assert ("media", "https://x.example.com/hero.jpg") in found
+    assert ("image", "https://x.example.com/trust.jpg") in found
+    assert len(found) == 2  # the None banner, the youtube media and the product dict are all excluded
+
+
+def test_qa_agent_repairs_a_broken_dimension_image_by_re_resolving_it(monkeypatch):
+    import asyncio
+
+    from consumer_intelligence import brand_media, logo_resolver, qa_agent
+
+    async def fake_fetch_image(client, url):
+        return None if url == "https://dead.example.com/x.jpg" else b"bytes"
+
+    async def fake_stock_photo(query):
+        assert query == "Armor All Car care Trust"
+        return {"type": "image", "url": "https://live.example.com/new.jpg", "source": "duckduckgo"}
+
+    monkeypatch.setattr(logo_resolver, "_fetch_image", fake_fetch_image)
+    monkeypatch.setattr(brand_media, "stock_photo", fake_stock_photo)
+    payload = {
+        "meta": {"brand": "Armor All"},
+        "brand_health_storyboard": {
+            "meta": {"brand": "Armor All", "category": "Car care", "logos": {"Armor All": "https://logo.example/armor-all.png"}},
+            "dimensions": [{"key": "trust", "name": "Trust", "image": "https://dead.example.com/x.jpg"}],
+        },
+    }
+    report = asyncio.run(qa_agent.run(payload, [], max_iterations=2, network=True))
+    assert payload["brand_health_storyboard"]["dimensions"][0]["image"] == "https://live.example.com/new.jpg"
+    assert report["fixed"].get("slot_image_broken") == 1
+    assert report["remaining_count"] == 0
+
+
+def test_qa_agent_clears_a_broken_hero_media_when_nothing_live_is_found(monkeypatch):
+    import asyncio
+
+    from consumer_intelligence import brand_media, logo_resolver, qa_agent
+
+    async def fake_fetch_image(client, url):
+        return None  # every candidate is dead, including whatever a repair might try
+
+    async def fake_stock_photo(query):
+        return None  # DuckDuckGo and Pexels both come up empty
+
+    monkeypatch.setattr(logo_resolver, "_fetch_image", fake_fetch_image)
+    monkeypatch.setattr(brand_media, "stock_photo", fake_stock_photo)
+    payload = {
+        "meta": {"brand": "Armor All"},
+        "brand_health_storyboard": {
+            "meta": {"brand": "Armor All", "logos": {}},
+            "hero": {"media": {"type": "image", "url": "https://dead.example.com/hero.jpg"}},
+        },
+    }
+    asyncio.run(qa_agent.run(payload, [], max_iterations=2, network=True))
+    assert payload["brand_health_storyboard"]["hero"]["media"] is None  # cleared, not left dangling
+
+
 def test_run_stops_within_its_time_budget_instead_of_hanging(monkeypatch):
     import asyncio
     from consumer_intelligence import qa_agent, verbatim_capture
@@ -155,3 +222,14 @@ def test_run_stops_within_its_time_budget_instead_of_hanging(monkeypatch):
     report = asyncio.run(qa_agent.run(payload, [], max_iterations=5, network=False))
     assert report["timed_out"] is True
     assert report["iterations"] == 0
+
+
+def test_discover_brand_names_finds_every_brand_key_in_a_ranking_table():
+    from consumer_intelligence.logo_resolver import discover_brand_names
+
+    storyboard = {
+        "meta": {"brand": "Armor All", "logos": {}},
+        "competitive": {"rows": [{"brand": "NXT Wax", "share_of_voice": 0.9}, {"brand": "303", "share_of_voice": 0.3}]},
+        "themes": [{"name": "Gift Guide"}],  # "name" key must NOT be picked up
+    }
+    assert discover_brand_names(storyboard) == {"Armor All", "NXT Wax", "303"}

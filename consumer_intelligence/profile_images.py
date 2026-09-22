@@ -6,10 +6,14 @@ Per post, `identify` works out (platform, handle):
   * Tumblr      - the blog subdomain
   * YouTube     - `youtube.com/@handle`, else the author
   * Instagram / Facebook / Reddit - the author field (those URLs carry no handle)
+  * Forum and retailer-review posts - the author field, with the post's own page
+    as the place to look (see post_avatar.py)
 
 Sources, cheapest and most honest first:
   * Twitter and YouTube through unavatar.io (free tier)
   * Tumblr through its own public avatar API
+  * Forum and review posters through the avatar shown beside their username on
+    the post's page, fetched with scrapling (post_avatar.py)
   * Instagram, Facebook and Reddit only when `UNAVATAR_API_KEY` (a paid plan) is set;
     without it they are skipped and the FE draws initials plus the platform icon.
 
@@ -26,6 +30,7 @@ import logging
 import os
 import re
 import time
+from urllib.parse import urlsplit
 
 from file_helpers.s3_file import s3_file
 
@@ -53,10 +58,17 @@ _PEOPLE_LISTS = {
     "quotes": "author",
     "quotes_positive": "author",
     "quotes_negative": "author",
+    "posts": "author",  # Brand Perception's "What people say"
     "top_influencers": "author",
     "authors_by_reach": "name",
     "authors_by_volume": "name",
 }
+
+_PAGE_SOURCES = {"forums", "forum", "review", "reviews"}  # platforms whose posts show an avatar on the page
+# handle ("author@host") -> the post page to read the avatar from. Set by `identify`.
+_POST_PAGE: dict[str, str] = {}
+# S3 key -> the avatar URL it was downloaded from, to spot a site-wide default.
+_SOURCE_URL: dict[str, str] = {}
 
 # (provider, handle) -> S3 key, or None when no real picture exists. Per process.
 _RESOLVED: dict[tuple[str, str], str | None] = {}
@@ -81,6 +93,11 @@ def identify(article: dict) -> tuple[str, str] | None:
     for needle, provider in (("instagram.com", "instagram"), ("reddit.com", "reddit"), ("facebook.com", "facebook")):
         if needle in host:
             return (provider, valid_author) if valid_author else None
+    platform = str(article.get("content source name") or article.get("section") or "").strip().lower()
+    if platform in _PAGE_SOURCES and author and url.startswith("http"):
+        handle = f"{author}@{urlsplit(url).netloc.lower()}"
+        _POST_PAGE.setdefault(handle.lower(), url)
+        return "post", handle
     return None
 
 
@@ -103,10 +120,69 @@ def _get(url: str, headers: dict[str, str]):
     return requests.get(url, headers=headers, timeout=_TIMEOUT, allow_redirects=True)
 
 
+def is_image_bytes(data: bytes | None) -> bool:
+    """A stored picture the browser can actually draw: big enough and starting
+    with a PNG, JPEG, GIF or WebP signature (an empty object, an HTML error
+    page or a truncated download all fail)."""
+    if not data or len(data) < _MIN_BYTES:
+        return False
+    return (
+        data.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8"))
+        or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")
+    )
+
+
+def known_absent(provider: str, handle: str) -> bool:
+    """This poster was already looked up in this process and has no picture to
+    find (deleted account, review page with no reviewer photo, blocked forum)."""
+    ident = (provider, handle.lower())
+    return ident in _RESOLVED and _RESOLVED[ident] is None
+
+
+def forget(provider: str, handle: str) -> None:
+    """Drop the in-process answer for a poster, so the next `_resolve` looks again."""
+    _RESOLVED.pop((provider, handle.lower()), None)
+
+
+def _is_real_image(resp) -> bool:
+    kind = resp.headers.get("content-type", "")
+    return (
+        resp.status_code == 200
+        and kind.startswith("image/")
+        and "svg" not in kind  # unavatar's stand-in for an unknown handle; a rank badge on a forum
+        and "default_avatar" not in str(resp.url)  # Tumblr's stand-in
+        and len(resp.content) >= _MIN_BYTES
+    )
+
+
+async def _download_post_avatar(handle: str, key: str) -> bytes | None:
+    """The avatar shown beside the poster's name on their post's page."""
+    from . import post_avatar
+
+    page = _POST_PAGE.get(handle.lower())
+    if not page:
+        return None
+    author = handle.rsplit("@", 1)[0]
+    avatar_url = await asyncio.to_thread(post_avatar.fetch_avatar_url, page, author)
+    if not avatar_url:
+        return None
+    try:
+        resp = await asyncio.to_thread(_get, avatar_url, {"User-Agent": _UA, "Referer": page})
+    except Exception as exc:
+        logger.info("Post avatar download skipped for %s: %s", handle, exc)
+        return None
+    if not _is_real_image(resp):
+        return None
+    _SOURCE_URL[key] = avatar_url
+    return resp.content
+
+
 async def _download(provider: str, handle: str) -> bytes | None:
     """The picture's bytes, or None when the source has no real one.
     Raises _RateLimited when the service asked us to slow down."""
     global _unavatar_blocked_until
+    if provider == "post":
+        return await _download_post_avatar(handle, _key(provider, handle))
     headers: dict[str, str] = {"User-Agent": _UA}
     via_unavatar = provider != "tumblr"
     if provider == "tumblr":
@@ -130,15 +206,7 @@ async def _download(provider: str, handle: str) -> bytes | None:
         _unavatar_blocked_until = reset_ms / 1000 if reset_ms else time.time() + 300
         logger.info("unavatar rate limited; pausing avatar lookups until %s", _unavatar_blocked_until)
         raise _RateLimited
-    kind = resp.headers.get("content-type", "")
-    is_real = (
-        resp.status_code == 200
-        and kind.startswith("image/")
-        and "svg" not in kind  # unavatar's stand-in for an unknown handle
-        and "default_avatar" not in str(resp.url)  # Tumblr's stand-in
-        and len(resp.content) >= _MIN_BYTES
-    )
-    return resp.content if is_real else None
+    return resp.content if _is_real_image(resp) else None
 
 
 async def _resolve(provider: str, handle: str) -> str | None:
@@ -195,6 +263,20 @@ def _people_rows(node) -> list[tuple[dict, str]]:
     return found
 
 
+def _drop_shared_defaults(rows: list[dict]) -> None:
+    """A picture that several different posters were given is the site's default
+    avatar, not any of their faces: take it back off every row."""
+    keys_by_url: dict[str, set[str]] = {}
+    for row in rows:
+        key = row.get("avatar_key")
+        if key and key in _SOURCE_URL:
+            keys_by_url.setdefault(_SOURCE_URL[key], set()).add(key)
+    shared = {url for url, keys in keys_by_url.items() if len(keys) > 1}
+    for row in rows:
+        if _SOURCE_URL.get(row.get("avatar_key")) in shared:
+            row.pop("avatar_key", None)
+
+
 async def attach(storyboard: dict, articles: list[dict]) -> None:
     """Set `avatar_key` on every person row of `storyboard` whose poster's
     picture could be fetched. Never raises."""
@@ -213,5 +295,6 @@ async def attach(storyboard: dict, articles: list[dict]) -> None:
                 row["avatar_key"] = key
 
         await asyncio.gather(*(one(row, who) for row, who in rows))
+        _drop_shared_defaults([row for row, _ in rows])
     except Exception as exc:  # belt and braces — avatars are decoration
         logger.warning("profile image pass failed: %s", exc)
