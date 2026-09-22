@@ -1,3 +1,5 @@
+import codecs
+import csv
 import io
 import json
 from typing import Any
@@ -8,6 +10,41 @@ SUPPORTED_EXTENSIONS = {"csv", "xlsx", "xls", "json"}
 
 def _ext(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _decode_text(content: bytes) -> str:
+    """Bytes of an uploaded text file -> str, honouring the byte order mark.
+
+    Excel's "Unicode Text" / Meltwater exports are UTF-16 LE with a FF FE mark;
+    pandas' default (UTF-8) fails on them with "can't decode byte 0xff in
+    position 0". Then UTF-8 with or without BOM, then Windows-1252 (Excel's
+    plain "CSV" on a Western locale), which accepts any byte sequence.
+    """
+    if content.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return content.decode("utf-16")
+    if content.startswith(codecs.BOM_UTF8):
+        return content.decode("utf-8-sig")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("cp1252", errors="replace")
+
+
+def _sniff_delimiter(text: str) -> str:
+    """Comma, tab, semicolon or pipe: whichever the header row uses.
+    UTF-16 Excel exports are tab-separated despite the .csv extension."""
+    header = text.lstrip("\ufeff").split("\n", 1)[0]
+    try:
+        return csv.Sniffer().sniff(header, delimiters=",\t;|").delimiter
+    except csv.Error:
+        counts = {d: header.count(d) for d in (",", "\t", ";", "|")}
+        best = max(counts, key=counts.get)
+        return best if counts[best] else ","
+
+
+def _read_csv(content: bytes) -> pd.DataFrame:
+    text = _decode_text(content)
+    return pd.read_csv(io.StringIO(text), sep=_sniff_delimiter(text))
 
 
 def parse_upload(filename: str, content: bytes) -> list[dict[str, Any]]:
@@ -23,7 +60,7 @@ def parse_upload(filename: str, content: bytes) -> list[dict[str, Any]]:
         raise ValueError(f"Unsupported file type '.{ext}'. Use one of: {sorted(SUPPORTED_EXTENSIONS)}")
 
     if ext == "csv":
-        df = pd.read_csv(io.BytesIO(content))
+        df = _read_csv(content)
         json_data = df_to_records(df)
         updated_data = update_columns_name(json_data)
         filtered_data = filter_articles_with_date(updated_data)
