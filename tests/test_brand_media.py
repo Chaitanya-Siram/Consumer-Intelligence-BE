@@ -323,3 +323,64 @@ def test_muckrack_slugs_try_the_hyphenated_form_then_the_joined_one():
     assert brand_media._muckrack_slugs("Walt Mossberg") == ["walt-mossberg", "waltmossberg"]
     assert brand_media._muckrack_slugs("Cher") == ["cher"]  # one word: both forms identical
     assert brand_media._muckrack_slugs("") == []
+
+
+def test_is_browser_renderable_rejects_facebook_lookaside_and_accepts_normal_cdns():
+    assert not brand_media._is_browser_renderable("https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=1")
+    assert not brand_media._is_browser_renderable("https://sub.lookaside.fbsbx.com/x.jpg")
+    assert brand_media._is_browser_renderable("https://www.chemicalguys.com/cdn/shop/files/x.jpg")
+    assert brand_media._is_browser_renderable("https://i5.walmartimages.com/seo/x.jpeg")
+    assert not brand_media._is_browser_renderable("")
+
+
+def test_duckduckgo_image_skips_an_unrenderable_hit_and_returns_the_next_usable_one():
+    calls = []
+
+    def fake_search():
+        calls.append(1)
+        return [
+            {"image": "https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=1", "title": "fb"},
+            {"image": "https://cdn.example.com/real.jpg", "title": "real"},
+        ]
+
+    class FakeDDGS:
+        def images(self, query, max_results=1, safesearch="moderate"):
+            return fake_search()
+
+    import sys
+    import types
+
+    fake_module = types.ModuleType("ddgs")
+    fake_module.DDGS = FakeDDGS
+    saved = sys.modules.get("ddgs")
+    sys.modules["ddgs"] = fake_module
+    try:
+        result = asyncio.run(brand_media.duckduckgo_image("Meguiar's Product Endorsement"))
+    finally:
+        if saved is not None:
+            sys.modules["ddgs"] = saved
+        else:
+            del sys.modules["ddgs"]
+    assert result == {"type": "image", "url": "https://cdn.example.com/real.jpg", "alt": "real", "source": "duckduckgo"}
+
+
+def test_duckduckgo_image_returns_none_when_every_hit_is_unrenderable():
+    import sys
+    import types
+
+    class FakeDDGS:
+        def images(self, query, max_results=1, safesearch="moderate"):
+            return [{"image": "https://lookaside.fbsbx.com/x", "title": "fb"}]
+
+    fake_module = types.ModuleType("ddgs")
+    fake_module.DDGS = FakeDDGS
+    saved = sys.modules.get("ddgs")
+    sys.modules["ddgs"] = fake_module
+    try:
+        result = asyncio.run(brand_media.duckduckgo_image("Anything"))
+    finally:
+        if saved is not None:
+            sys.modules["ddgs"] = saved
+        else:
+            del sys.modules["ddgs"]
+    assert result is None

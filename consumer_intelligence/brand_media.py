@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import re
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +305,19 @@ async def pexels_photo(query: str, *, orientation: str = "landscape") -> dict | 
         return None
 
 
+_DDG_RESULTS = 5  # candidates fetched so a blocked-host hit doesn't waste the whole search
+# Hosts whose images a plain server-side fetch can load but a real browser
+# cannot: lookaside.fbsbx.com is Facebook's *own crawler's* proxy for a page's
+# preview image — it answers a bare GET (curl, httpx) but rejects the request
+# a real <img> tag makes, so a URL from here always renders as broken.
+_UNRENDERABLE_IMAGE_HOSTS = ("fbsbx.com",)
+
+
+def _is_browser_renderable(url: str) -> bool:
+    host = urlsplit(url).netloc.lower()
+    return bool(host) and not any(host == h or host.endswith("." + h) for h in _UNRENDERABLE_IMAGE_HOSTS)
+
+
 async def duckduckgo_image(query: str) -> dict | None:
     """One real image for `query` via DuckDuckGo's keyless image search — often
     the actual product or brand photo itself (a retailer listing, a press
@@ -317,15 +331,14 @@ async def duckduckgo_image(query: str) -> dict | None:
         from ddgs import DDGS
 
         def _search() -> list[dict]:
-            return DDGS().images(query, max_results=1, safesearch="moderate")
+            return DDGS().images(query, max_results=_DDG_RESULTS, safesearch="moderate")
 
         results = await asyncio.to_thread(_search)
-        if not results:
-            return None
-        url = results[0].get("image")
-        if not url:
-            return None
-        return {"type": "image", "url": url, "alt": results[0].get("title") or query, "source": "duckduckgo"}
+        for result in results or []:
+            url = result.get("image")
+            if url and _is_browser_renderable(url):
+                return {"type": "image", "url": url, "alt": result.get("title") or query, "source": "duckduckgo"}
+        return None
     except Exception as exc:
         logger.debug("duckduckgo image search failed for %r: %s", query, exc)
         return None
