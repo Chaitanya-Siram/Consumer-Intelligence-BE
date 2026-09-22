@@ -37,7 +37,7 @@ tavily-python
 # Social Research "Supporting Verbatims": server-side screenshot capture for
 # posts with no public embed API. Needs `playwright install chromium` once
 # after installing requirements (not run automatically by pip).
-playwright==1.49.0
+playwright==1.63.0  # >=1.62 required by scrapling[fetchers] below
 # CI storyboard banners: keyless DuckDuckGo image search, tried before Pexels
 # for every card photo (see brand_media.duckduckgo_image) — MCP servers such
 # as the ddg-search one configured for this project are Claude Code's own
