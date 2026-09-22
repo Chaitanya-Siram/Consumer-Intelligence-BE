@@ -318,12 +318,48 @@ def _is_browser_renderable(url: str) -> bool:
     return bool(host) and not any(host == h or host.endswith("." + h) for h in _UNRENDERABLE_IMAGE_HOSTS)
 
 
+_LIVENESS_TIMEOUT = 6.0
+# GET, never HEAD: some CDNs (imgix, S3, retailer product-image hosts) 404,
+# 403 or method-not-allow a HEAD request while serving the same URL fine on
+# GET, so a HEAD-only check would reject perfectly good photos. `stream`
+# fetches only the response headers here — the body is never read.
+_RANGE_HEADER = {"Range": "bytes=0-0"}
+
+
+async def _url_is_live(url: str) -> bool:
+    """True when `url` serves an actual image right now — not just a
+    well-formed link on a renderable host. A DuckDuckGo hit is scraped from
+    an arbitrary web page; the CDN asset behind it can be renamed, hotlink-
+    protected, or pulled entirely by the time the dashboard renders, and a
+    dead one then shows as a permanently blank card with no way for the FE to
+    recover a real photo on its own. Checking liveness once here, at build
+    time, is what makes a resolved image URL trustworthy for good — the FE's
+    `useVerifiedImage` probe is only a last-resort safety net for photos that
+    go stale after the payload was cached, not the primary defence."""
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=_LIVENESS_TIMEOUT, follow_redirects=True) as client, client.stream(
+            "GET", url, headers=_RANGE_HEADER
+        ) as resp:
+            content_type = resp.headers.get("content-type", "")
+            return resp.status_code < 400 and content_type.startswith("image/")
+    except Exception as exc:
+        logger.debug("image liveness check failed for %r: %s", url, exc)
+        return False
+
+
 async def duckduckgo_image(query: str) -> dict | None:
     """One real image for `query` via DuckDuckGo's keyless image search — often
     the actual product or brand photo itself (a retailer listing, a press
     photo), not generic stock photography. No API key, no account; `ddgs` is
     a synchronous scraping client, so the call runs off-thread. Tried first,
     ahead of Pexels, for every banner/card photo — see `stock_photo` below.
+
+    Every renderable-host candidate is verified live (see `_url_is_live`)
+    before being returned, concurrently and in DuckDuckGo's own ranked order,
+    so the first dead or hotlink-blocked hit never gets shipped to the FE —
+    the next real candidate is used instead.
     """
     if not query:
         return None
@@ -334,10 +370,13 @@ async def duckduckgo_image(query: str) -> dict | None:
             return DDGS().images(query, max_results=_DDG_RESULTS, safesearch="moderate")
 
         results = await asyncio.to_thread(_search)
-        for result in results or []:
-            url = result.get("image")
-            if url and _is_browser_renderable(url):
-                return {"type": "image", "url": url, "alt": result.get("title") or query, "source": "duckduckgo"}
+        candidates = [r for r in (results or []) if r.get("image") and _is_browser_renderable(r["image"])]
+        if not candidates:
+            return None
+        alive = await asyncio.gather(*(_url_is_live(c["image"]) for c in candidates))
+        for result, is_alive in zip(candidates, alive):
+            if is_alive:
+                return {"type": "image", "url": result["image"], "alt": result.get("title") or query, "source": "duckduckgo"}
         return None
     except Exception as exc:
         logger.debug("duckduckgo image search failed for %r: %s", query, exc)

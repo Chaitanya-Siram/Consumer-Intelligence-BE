@@ -19,6 +19,21 @@ def _patch_stock_photo(fake):
     return saved
 
 
+def _patch_url_is_live(fake):
+    """duckduckgo_image verifies every renderable-host candidate against
+    `_url_is_live` (a real network call) before returning it. Tests that only
+    care about the search/ranking logic stub that seam so they stay offline
+    and deterministic, the same way `_patch_stock_photo` above does for
+    `resolve_slot_images`."""
+    saved = brand_media._url_is_live
+    brand_media._url_is_live = fake
+    return saved
+
+
+async def _always_live(url):
+    return True
+
+
 def test_resolve_slot_images_fills_every_none_image_slot_found_anywhere():
     calls = []
 
@@ -208,6 +223,7 @@ def test_duckduckgo_image_extracts_the_first_hits_url_and_title():
     fake_module.DDGS = FakeDDGS
     saved = sys.modules.get("ddgs")
     sys.modules["ddgs"] = fake_module
+    saved_live = _patch_url_is_live(_always_live)
     try:
         result = asyncio.run(brand_media.duckduckgo_image("Armor All Car care Awareness"))
     finally:
@@ -215,6 +231,7 @@ def test_duckduckgo_image_extracts_the_first_hits_url_and_title():
             sys.modules["ddgs"] = saved
         else:
             del sys.modules["ddgs"]
+        brand_media._url_is_live = saved_live
 
     assert result == {
         "type": "image",
@@ -354,6 +371,7 @@ def test_duckduckgo_image_skips_an_unrenderable_hit_and_returns_the_next_usable_
     fake_module.DDGS = FakeDDGS
     saved = sys.modules.get("ddgs")
     sys.modules["ddgs"] = fake_module
+    saved_live = _patch_url_is_live(_always_live)
     try:
         result = asyncio.run(brand_media.duckduckgo_image("Meguiar's Product Endorsement"))
     finally:
@@ -361,6 +379,7 @@ def test_duckduckgo_image_skips_an_unrenderable_hit_and_returns_the_next_usable_
             sys.modules["ddgs"] = saved
         else:
             del sys.modules["ddgs"]
+        brand_media._url_is_live = saved_live
     assert result == {"type": "image", "url": "https://cdn.example.com/real.jpg", "alt": "real", "source": "duckduckgo"}
 
 
@@ -384,3 +403,168 @@ def test_duckduckgo_image_returns_none_when_every_hit_is_unrenderable():
         else:
             del sys.modules["ddgs"]
     assert result is None
+
+
+def test_duckduckgo_image_skips_a_dead_candidate_and_returns_the_next_live_one():
+    """The permanent fix for a resolved photo going 404/hotlink-blocked by the
+    time the dashboard renders (e.g. a retailer CDN link that no longer
+    serves the product photo): DuckDuckGo's top hit fails the liveness check,
+    so the next candidate — which is live — is returned instead of a dead
+    link nobody catches until it renders blank on the FE."""
+
+    class FakeDDGS:
+        def images(self, query, max_results=1, safesearch="moderate"):
+            return [
+                {"image": "https://deadcdn.example.com/gone.jpg", "title": "dead"},
+                {"image": "https://livecdn.example.com/real.jpg", "title": "live"},
+            ]
+
+    fake_module = types.ModuleType("ddgs")
+    fake_module.DDGS = FakeDDGS
+    saved = sys.modules.get("ddgs")
+    sys.modules["ddgs"] = fake_module
+
+    async def fake_is_live(url):
+        return url == "https://livecdn.example.com/real.jpg"
+
+    saved_live = _patch_url_is_live(fake_is_live)
+    try:
+        result = asyncio.run(brand_media.duckduckgo_image("Armor All Preference"))
+    finally:
+        if saved is not None:
+            sys.modules["ddgs"] = saved
+        else:
+            del sys.modules["ddgs"]
+        brand_media._url_is_live = saved_live
+
+    assert result == {"type": "image", "url": "https://livecdn.example.com/real.jpg", "alt": "live", "source": "duckduckgo"}
+
+
+def test_duckduckgo_image_returns_none_when_every_candidate_is_dead():
+    class FakeDDGS:
+        def images(self, query, max_results=1, safesearch="moderate"):
+            return [{"image": "https://deadcdn.example.com/gone.jpg", "title": "dead"}]
+
+    fake_module = types.ModuleType("ddgs")
+    fake_module.DDGS = FakeDDGS
+    saved = sys.modules.get("ddgs")
+    sys.modules["ddgs"] = fake_module
+
+    async def fake_dead(url):
+        return False
+
+    saved_live = _patch_url_is_live(fake_dead)
+    try:
+        result = asyncio.run(brand_media.duckduckgo_image("Armor All Advocacy"))
+    finally:
+        if saved is not None:
+            sys.modules["ddgs"] = saved
+        else:
+            del sys.modules["ddgs"]
+        brand_media._url_is_live = saved_live
+
+    assert result is None
+
+
+def test_url_is_live_true_for_a_200_image_response():
+    class FakeStream:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {"content-type": "image/jpeg"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None, follow_redirects=None):
+            pass
+
+        def stream(self, method, url, headers=None):
+            assert method == "GET"
+            return FakeStream()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    fake_httpx = types.ModuleType("httpx")
+    fake_httpx.AsyncClient = FakeAsyncClient
+    saved = sys.modules.get("httpx")
+    sys.modules["httpx"] = fake_httpx
+    try:
+        assert asyncio.run(brand_media._url_is_live("https://cdn.example.com/x.jpg")) is True
+    finally:
+        if saved is not None:
+            sys.modules["httpx"] = saved
+        else:
+            del sys.modules["httpx"]
+
+
+def test_url_is_live_false_for_a_404_or_a_non_image_content_type():
+    class FakeStream:
+        def __init__(self, status_code, content_type):
+            self.status_code = status_code
+            self.headers = {"content-type": content_type}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeAsyncClient:
+        def __init__(self, timeout=None, follow_redirects=None):
+            pass
+
+        def stream(self, method, url, headers=None):
+            return FakeStream(404, "text/html")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    fake_httpx = types.ModuleType("httpx")
+    fake_httpx.AsyncClient = FakeAsyncClient
+    saved = sys.modules.get("httpx")
+    sys.modules["httpx"] = fake_httpx
+    try:
+        assert asyncio.run(brand_media._url_is_live("https://cdn.example.com/gone.jpg")) is False
+    finally:
+        if saved is not None:
+            sys.modules["httpx"] = saved
+        else:
+            del sys.modules["httpx"]
+
+
+def test_url_is_live_false_when_the_request_raises():
+    class FakeAsyncClient:
+        def __init__(self, timeout=None, follow_redirects=None):
+            pass
+
+        def stream(self, method, url, headers=None):
+            raise OSError("network unreachable")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    fake_httpx = types.ModuleType("httpx")
+    fake_httpx.AsyncClient = FakeAsyncClient
+    saved = sys.modules.get("httpx")
+    sys.modules["httpx"] = fake_httpx
+    try:
+        assert asyncio.run(brand_media._url_is_live("https://cdn.example.com/x.jpg")) is False
+    finally:
+        if saved is not None:
+            sys.modules["httpx"] = saved
+        else:
+            del sys.modules["httpx"]
