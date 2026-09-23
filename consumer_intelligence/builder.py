@@ -304,6 +304,10 @@ async def _build_one(
                 hero["media"] = hero_media
             if brand_assets and not hero.get("logo_url"):
                 hero["logo_url"] = brand_assets.get("logo_url")
+        elif hero_media:
+            # market_intel and friends have no top-level `hero` block; the FE
+            # (Lens1's Key Takeaways) reads the hero from meta.hero_media instead.
+            storyboard.setdefault("meta", {})["hero_media"] = hero_media
         if brand_assets:
             storyboard.setdefault("meta", {})["brand_assets"] = brand_assets
 

@@ -5,7 +5,7 @@ Adaptation: news articles don't carry `bhi_dimension`. This module derives
 the BHI dimension from theme/subtheme/content keyword matching.
 """
 
-from .. import aggregate, brand_media
+from .. import aggregate, brand_media, cohorts
 from . import brands as brand_metrics
 
 LENS_KEY = "brand_health_storyboard"
@@ -114,6 +114,21 @@ def _split(articles: list[dict]) -> list[dict]:
         }
         for label, tone in (("Positive", "pos"), ("Neutral", "neu"), ("Negative", "neg"))
     ]
+
+
+def _channel_counts(articles: list[dict]) -> dict[str, int]:
+    """Posts per platform (Twitter, Instagram, Forums...). Tagged rows carry no
+    `source_type` key: an upload lands as `source name` / `source type`, and a
+    news row has only a section, so use the same resolver every other lens
+    uses (cohorts.platform), which knows each spelling and falls back to the
+    section label."""
+    counts: dict[str, int] = {}
+    for a in articles:
+        name = cohorts.platform(a)
+        if not name or aggregate.is_junk(name):
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def _bars(counts: dict[str, int], limit: int) -> list[dict]:
@@ -232,7 +247,7 @@ def _dimension(name: str, spec: dict, rows: list[dict], total: int, days: list[s
         "reach": round(sum(aggregate.reach(a) for a in rows)),
         "sub_kpis": _sub_kpis(rows, TOP_SUB_KPIS),
         "themes": _bars(aggregate.count_by(rows, "theme", skip_junk=True), TOP_SUB_KPIS),
-        "channels": _bars(aggregate.count_by(rows, "source_type", skip_junk=True), TOP_CHANNELS),
+        "channels": _bars(_channel_counts(rows), TOP_CHANNELS),
         "sentiment_split": _split(rows),
         "confidence": _confidence(rows),
         "daily": _daily(rows, days),
@@ -383,7 +398,7 @@ def build_storyboard(articles: list[dict], *, brand: str, known_brands: list[str
         "bhi": composite,
         "dimensions": dimensions,
         "sentiment_split": _split(articles),
-        "channels": _bars(aggregate.count_by(articles, "source_type", skip_junk=True), TOP_CHANNELS),
+        "channels": _bars(_channel_counts(articles), TOP_CHANNELS),
         "kpi_distribution": [
             {
                 "name": d["name"],
