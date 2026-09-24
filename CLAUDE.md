@@ -5,8 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies
+# Install dependencies (then one-time browser installs for screenshot / stealth fetchers)
 pip install -r requirements.txt
+playwright install chromium
+scrapling install
 
 # Run dev server (hot-reload)
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
@@ -14,12 +16,19 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Run production server (matches Dockerfile CMD)
 uvicorn main:app --host 0.0.0.0 --port 8000
 
+# Tests (pytest is not in requirements.txt; install it separately). All offline, ~45s.
+python -m pytest tests -q
+python -m pytest tests/test_ci_cache_fingerprint.py -q            # one file
+python -m pytest tests/test_post_avatar.py -q -k xenforo           # one test by keyword
+
 # Docker build & run
 docker build -t pr-solutions-be-v2 .
 docker run -p 8000:8000 --env-file .env pr-solutions-be-v2
 ```
 
-No test runner or linter is configured. API docs auto-generated at `/docs` (Swagger) and `/redoc`. README.md is empty.
+No linter is configured. Tests live in `tests/` as plain `test_*` functions with no conftest or pytest config; they stub network calls and never hit the DB, S3 or an LLM. API docs auto-generated at `/docs` (Swagger) and `/redoc`. README.md is empty.
+
+Two env files exist locally: `.env` (local dev, Docker Postgres replica, `CI_CACHE_SCOPE=local`) and `.env.render` (Render). Never point local at the Render DB unasked.
 
 ## Architecture
 
@@ -27,14 +36,14 @@ No test runner or linter is configured. API docs auto-generated at `/docs` (Swag
 
 ### Entry Point & Config
 
-- `main.py` — registers 12 routers (11 from `routers/` + `consumer_intelligence.router`), mounts CORS, calls `init_db()` at import time
-- `configs.py` — `Configs` class loaded as singleton `envs = Configs()` everywhere; also exports the shared `logger`. All env vars read here via `python-dotenv`
+- `main.py` — registers 12 routers (11 from `routers/` + `consumer_intelligence.router`), mounts CORS, installs `exception_handlers.validation_exception_handler` (flattens 422 bodies to a single `detail` string), calls `init_db()` at import time
+- `configs.py` — `Configs` class loaded as singleton `envs = Configs()` everywhere; also exports the shared `logger`. Core env vars read here via `python-dotenv`; the CI package reads its own optional knobs with `os.getenv` directly
 
 ### Layer Structure
 
 ```
 routers/               → HTTP/WebSocket handlers (one APIRouter per domain) — Media Intelligence pipeline
-consumer_intelligence/ → Consumer Intelligence lens backend (own router, builder, storyboards) — see below
+consumer_intelligence/ → Consumer Intelligence lens backend (own router, builder, storyboards, media, QA) — see below
 db_helpers/
   models/              → SQLAlchemy ORM classes + Pydantic response schemas, co-located per entity
   repository/          → Plain functions wrapping SQLAlchemy queries per domain
@@ -48,8 +57,9 @@ agents/                → chart_generator (E2B sandbox), relevancy_agent, workf
 rag_helpers/           → LlamaIndex + pgvector RAG (ingestion, retrieval, reranker, LangGraph agent); used by agent_api & tagging_api
 charts_helpers/        → MI chart computation (dashboards, media_monitoring, pr_calculation, reputation, default_charts)
 data_source_helpers/   → Article fetchers (Google News RSS, SerpAPI, Tavily, Phyllo) — fetching_service_v2.py, api_sources/
-file_helpers/          → S3 (s3_file.py), file parsing (CSV/Excel/DOCX), SimilarWeb reach, publication lookup
+file_helpers/          → S3 (s3_file.py), file parsing (CSV/Excel/DOCX; UTF-16 and non-comma CSV accepted), SimilarWeb reach, publication lookup
 reports_helpers/       → Client-specific report generators (beone, otsuka, trane)
+tests/                 → Offline pytest suite, almost entirely for consumer_intelligence/ media + cache logic
 build/                 → k8s Deployment+Service manifest applied by CI (secret: pr-solution-v2-secret)
 ```
 
@@ -73,7 +83,7 @@ build/                 → k8s Deployment+Service manifest applied by CI (secret
 `LLM_PROVIDER` env var (default `gpt`) picks the provider. Aliases: `claude`/`anthropic` → Anthropic; `gpt`/`openai`/`azure`/`azure_openai` → Azure OpenAI.
 
 - **Article tagging**: `ai_helpers/llm_service.py` dispatches `tag_articles` / `tag_articles_streaming` to `claude_service.py` or `openai_service.py` (same signatures)
-- **CI narratives**: `consumer_intelligence/narrative_client.py` — separate async JSON-mode client, same `LLM_PROVIDER` switch
+- **CI narratives + classifiers**: `consumer_intelligence/narrative_client.py` — separate async JSON-mode client, same `LLM_PROVIDER` switch; also exposes `get_vision_client()` used by `brand_hero` to confirm a homepage image actually shows the brand
 - **Chart agent / section fetcher**: `agents/chart_generator/llm_client.py::complete_json`
 
 ### Workflow → Lens Dispatch (MI vs CI)
@@ -85,23 +95,52 @@ A session's `workflow` JSON column holds nodes; `analysis` nodes carry `data.len
 
 ### Consumer Intelligence Package
 
-Port of the reference `ConsumerIntelligence_PR` backend, adapted to news articles (no social engagement → falls back to reach; platform derived from section/domain; signal from subtheme/theme).
+Port of the reference `ConsumerIntelligence_PR` backend, adapted to news/social articles (no social engagement → falls back to reach; platform derived from `source name`/domain; signal from subtheme/theme). FE contracts: `Consumer-Intelligence-FE/docs/ci-lens-contract*.md`.
 
-- `tier_registry.py` — `TIER1_TO_LENS_KEYS` (Tier 1 workflow key → CI lens keys), `COMING_SOON_TIER1` (returns `{"status": "coming_soon"}`), `resolve_ci_lenses(nodes)` handles `lensType == "tier1"` expansion and standalone CI lens keys. Mirrors FE `src/workflow/constants.js` — keep in sync
-- `builder.py` — `build_ci_charts()` orchestrator. Per lens: `build_storyboard()` off-thread → `write_narrative()` and hero media/brand assets run concurrently. Build order is cheapest-first. `brand_intelligence` auto-bundles `brand_health_storyboard` + `brand_competitive_intel`. Emits events via `on_event` for WS streaming
-- `storyboard/<lens>.py` — one module per lens, each exposes `LENS_KEY` and `build_storyboard(articles, brand=, known_brands=)`. **Numbers computed here; every prose field left empty** for `narrative.py` to fill. Lenses: trend, brand_intel, health, bci, market_intel, network_map. Shared metric helpers: `brands.py`, `signals.py`
-- `storyboard/narrative.py` — `_facts_<lens>()` condenses numbers → single JSON-mode LLM call with strict schema → `_apply_<lens>()` merges defensively. **Never raises**; on failure the storyboard ships with numbers and empty prose
-- `aggregate.py` — pure aggregation helpers over tagged articles (date parsing, junk-label filtering)
-- `brand_media.py` — Brandfetch CDN/API logos, Pexels hero images, Iconify flag codes. All async, never raise, return `None` on failure
-- **Shared substrate for new lenses** (use these instead of re-implementing per lens): `timeseries.py` (adaptive week/month buckets — weekly under 90 days, gap-filled series, peaks, spikes > 1.6× trailing mean, early/late halves, period pairs), `cohorts.py` (brand / top-competitor / industry splits, single-vs-multiple brand, platform from `source name`, percent rows that sum to exactly 100), `quotes.py` (verbatim excerpt picker with platform · host attribution), `taxonomy.py` (one temperature-0 LLM call groups the raw `theme` long tail into ≤8 canonical groups with a loyalty bucket each; annotates `theme_group`; deterministic top-N fallback; stored in `meta.taxonomy`). Lenses in `builder._NEEDS_TAXONOMY` get annotated articles
-- **LLM boundary**: prose and *classification* (theme grouping, issue naming, spike labels) may come from the LLM; every number is computed in code. `taxonomy.canonicalize` and `narrative.write_narrative` are the only LLM entry points
-- Tier-2 lenses shipped: `track_emerging_issues` (`storyboard/emerging_issues.py`, issue = theme group ranked by growth + negativity + unmet needs + brand share), `shifting_audience_priorities` (`storyboard/audience_priorities.py`, loyalty index 10–100 from weighted bucket shares; `WEIGHTS` is a placeholder until deck values arrive), `perception_analysis` (`storyboard/perception.py` + `perception_classify.py`: raw themes → six fixed perception keys, negatives → fear/anger + aspect; no emotion tag exists so mix derives from sentiment), `dominant_narratives` (`storyboard/dominant_narratives.py` + `narratives_classify.py`: one batched per-post pass labels usage group / question intent / outlook attitude, a merge call folds outlook labels into 6–9 themes; platforms and brand shares reuse `cohorts`; no secondary-research input so `ext: true` is never emitted), `brand_perception` (`storyboard/brand_perception.py` + `brand_perception_classify.py`: popularity reuses `brands.mention_counts` ÷ brand-tagged posts, so it shares the tally with Brand & Competitive but not its denominator; batched per-post pass extracts brand-qualified product names, switching intent and one of five driver keys; gated on "Brand Perception" under `brand_intelligence`), and the three Whitespace & Gap lenses `audience_expectation` / `brand_messaging` / `brand_performance` (`storyboard/audience_expectation.py`, `brand_messaging.py`, `brand_performance.py` sharing `whitespace_classify.py`: one batched per-post pass labels attribute, unmet need, digital complaint, digital topic, brand initiative and usage; modules declare `PREPARE_KEY = "whitespace"` so the builder's per-build prepare cache runs it once; no brand-owned flag and no secondary research, so initiatives come from LLM classification and `mobile`/`survey`/`ext` are never emitted), and `user_behaviour` under the new Tier-1 `consumer_segmentation` (`storyboard/user_behaviour.py` + `behaviour_classify.py`: LLM life-stage inference per post gated at confidence 0.6, segment shares only when ≥20% of posts are banded; `brand_choice` from `brands.mention_counts` over multi-product posts; question bullets only for reason/rule clusters with ≥3 posts). `tier_registry.py` is the only place the backend enumerates Tier-1 keys, so a new pillar is one mapping line plus a gate. The three Regional Intelligence lenses `regional_sentiment` / `regional_engagement` / `regional_brand_perception` share `regional_classify.py` (`PREPARE_KEY = "regional"`) and `storyboard/regional_base.py::compute_regions` so all three carry the same `regions[]`: market per post resolves countries tag → URL ccTLD → LLM place cue (confidence ≥ 0.7) → the tagger's `region` field, which is the session's configured market on every post and is therefore reported per market under `sources.default` rather than treated as evidence; markets need ≥ 30 posts (≥ 10 when none reach 30); product types per post come from the same LLM pass merged to ≤ 8 names shared across markets; period halves split the window by time, not by post count. `congruence_content` under Tier-1 `llm_audit` (AI/LLM Audit and Analysis) is the one lens whose primary input is not the tagged articles: `llm_audit.py` runs a fixed prompt set against every assistant with a working key (adapters: ChatGPT via Azure, Claude via Anthropic web search, Perplexity, Gemini; Copilot and Meta AI have no API here), stores the run on S3 beside the CI cache (`.../llm_audit/latest.json`, reused for `LLM_AUDIT_TTL_DAYS`), and records `citation_mode` per response (`grounded` only when the assistant retrieved sources, else `model-claimed`); `audit_classify.py` proposes narrative pillars from the brand's own posts when the project has none (`pillars_source`) and labels each response (sentiment, themes, descriptors, per-pillar reproduce/ignore/contradict); `storyboard/congruence_content.py` computes sources, journalists, matrix, heatmap, scores and the social-validation cross-check against tagged articles. Its `prepare()` declares `PREPARE_ACCEPTS_CONTEXT` so the builder passes `session_id` and `refresh`. Contracts: `Consumer-Intelligence-FE/docs/ci-lens-contract*.md`
-- **Tier-2 gating**: by default every lens under a selected Tier-1 is built (Brand Intelligence parity). `tier_registry.TIER2_GATE` lists lenses that also require their label in the node's `data.tier2[]` (Perception Analysis does)
-- **Per-lens LLM prep**: modules in `builder._HAS_PREPARE` expose `async prepare(articles, brand=, known_brands=)`; its result is passed to `build_storyboard(prepared=...)`. Use this for classification a lens needs before counting; keep `build_storyboard` sync and pure
-- **Caching is incremental**: payload stored on S3 at `session_files/[{CI_CACHE_SCOPE}/]session_{id}/ci_charts_data/latest.json` (+ timestamped copy). `router._plan` compares cached lens keys with the session's required keys and rebuilds only the missing ones, merging via `_merge_payload` (drops stale coming-soon stubs). `refresh=true` rebuilds the requested lenses but keeps other cached ones, so `?lenses=x&refresh=true` refreshes one lens safely. Every saved payload carries `meta.source`, a fingerprint of the session record (created_at, brand and competitor keywords) plus the article ids and approved count it was built from; `router._plan` discards a cache whose fingerprint differs, because session ids get reused across a recreated session or a restored database and the old payload would otherwise be served for the wrong brand. Concurrent GETs for the same session and lens set share one in-flight build (`router._inflight`), because the FE fires two fetches on a first open. Local dev shares the S3 bucket with Render but not the DB, so set `CI_CACHE_SCOPE=local` in the dev `.env` (Render leaves it empty)
-- Adding a Tier-2 lens: builder module with `LENS_KEY` + `build_storyboard()` (+ optional `prepare`) → register in `builder._MODULES/_ORDER/_HERO_QUERY` (+ `_HAS_PREPARE`, `_NO_HERO_MEDIA`) → facts/schema/apply + `_REGISTRY` entry in `narrative.py` → `tier_registry.TIER1_TO_LENS_KEYS`, `CI_LENS_KEYS` (+ `TIER2_GATE` if only some Tier-2 selections should build it) → FE `CI_LENS_KEYS`/`TIER1_TO_CI_KEYS`, screen, route, `tierLensData` `route:`
+**Core rule: every number is computed in code; the LLM only writes prose and classifies.** `taxonomy.canonicalize`, `narrative.write_narrative`, the per-lens `*_classify.py` prepare passes, `llm_audit`, and the vision check in `brand_hero` are the only LLM entry points. Every LLM/media/network helper **never raises**; on failure the storyboard ships with numbers and empty prose or no media.
+
+#### Registry and build flow
+
+- `tier_registry.py` — the **only place the backend enumerates Tier-1 keys**. `TIER1_TO_LENS_KEYS` (Tier-1 workflow key → lens keys), `COMING_SOON_TIER1` (`influencer_mapping`, `crisis_solutioning` → `{"status": "coming_soon"}`), `CI_LENS_KEYS`, `TIER2_GATE` (lenses that also require their label in the node's `data.tier2[]`; unlisted lenses build whenever their Tier-1 is selected). `resolve_ci_lenses(nodes)` handles `lensType == "tier1"` expansion and standalone CI keys. Mirrors FE `src/workflow/constants.js` — keep in sync
+- `builder.py` — `build_ci_charts()` orchestrator. Registries: `_MODULES`, `_ORDER` (cheapest-first), `_BUNDLE` (`brand_intelligence` auto-adds `brand_health_storyboard` + `brand_competitive_intel`), `_NEEDS_TAXONOMY`, `_HAS_PREPARE`, `_HERO_QUERY`, `_VERBATIM_SECTIONS`/`_QUOTE_KEYS`, `_NO_HERO_MEDIA`. Per lens `_build_one`: optional `prepare()` (LLM classify, cached per build by `PREPARE_KEY`; `PREPARE_ACCEPTS_CONTEXT` modules also get `session_id`/`refresh`/`category`) → `build_storyboard()` off-thread (sync, pure) → concurrently `write_narrative()`, hero media, brand assets, verbatim evidence, author/journalist photos → then avatars, product photos, validated logos, leader videos, slot images. After all lenses, `qa_agent.run()` when `with_media`
+- `storyboard/<lens>.py` — one module per lens exposing `LENS_KEY` and `build_storyboard(articles, brand=, known_brands=, prepared=...)`. Numbers computed here; **every prose field left empty** for `narrative.py` to fill. Shared metric helpers `brands.py`, `signals.py`, `regional_base.py`
+- `storyboard/narrative.py` — `_facts_<lens>()` condenses numbers → one JSON-mode LLM call with strict schema → `_apply_<lens>()` merges defensively; `_REGISTRY` maps lens key → (facts, schema, apply, instruction)
+- **Shared substrate for new lenses** (use instead of re-implementing): `timeseries.py` (adaptive week/month buckets, gap-fill, peaks, spikes > 1.6× trailing mean, `halves()`), `cohorts.py` (brand / competitor / industry splits, platform from `source name`, percent rows summing to 100), `quotes.py` (verbatim excerpt picker with platform · host attribution), `taxonomy.py` (one temperature-0 call groups raw `theme` long tail into ≤8 canonical groups with loyalty bucket; annotates `theme_group`; deterministic fallback; stored in `meta.taxonomy`), `aggregate.py` (date parsing, junk-label filtering)
+
+#### Lenses shipped
+
+| Tier-1 key | Lens keys (module) | Notes |
+|---|---|---|
+| `brand_intelligence` | `brand_intelligence` (+bundled `brand_health_storyboard`, `brand_competitive_intel`), `brand_perception` | `brand_perception` gated; popularity reuses `brands.mention_counts` |
+| `market_intelligence` / `network_map_analysis` / standalone `trend_intelligence` | `market_intelligence`, `network_map`, `trend_intelligence` | original port |
+| `issues_intelligence` / `advanced_metrics` | `track_emerging_issues`, `shifting_audience_priorities` | taxonomy-driven; loyalty `WEIGHTS` placeholder |
+| `landscape_analysis` | `perception_analysis`, `dominant_narratives` | gated; six fixed perception keys, batched per-post labels |
+| `whitespace_gap_analysis` | `audience_expectation`, `brand_messaging`, `brand_performance` | gated; share `whitespace_classify.py` via `PREPARE_KEY="whitespace"` |
+| `consumer_segmentation` | `user_behaviour` | gated; life-stage inference at confidence ≥ 0.6 |
+| `regional_intelligence` | `regional_sentiment`, `regional_engagement`, `regional_brand_perception` | gated; share `regional_classify.py` (`PREPARE_KEY="regional"`) + `regional_base.compute_regions`; tagger `region` field is the configured market, reported under `sources.default`, not evidence |
+| `llm_audit` | `congruence_content` | gated; primary input is `llm_audit.py` run (ChatGPT/Claude/Perplexity/Gemini adapters, cached on S3 `.../llm_audit/latest.json` for `LLM_AUDIT_TTL_DAYS`, `citation_mode` grounded vs model-claimed); `PREPARE_ACCEPTS_CONTEXT` |
+| `social_research`, `social_listening`, `social_audit`, `pr_research` | same key each | **one lens, sub-lenses are `TABS` inside it**, not separate keys. Taxonomy-driven; social_listening/social_audit are single-brand (no competitor set); pr_research splits early/late via `timeseries.halves()` and resolves author headshots via Muck Rack (scrapling). Carry "Supporting Verbatims" sections listed in `_VERBATIM_SECTIONS` |
+
+#### Media, evidence and QA (all under `with_media`, all never raise)
+
+- `brand_media.py` — Pexels photos/videos, Brandfetch, DuckDuckGo image search (`ddgs`, keyless, tried **before** Pexels via `stock_photo`), URL liveness checks, `resolve_hero_media`, `resolve_brand_assets`, `resolve_slot_images` (per-dimension/tab sub-banners), Muck Rack author photos, Iconify flags
+- `brand_hero.py` — brand's own homepage first for the hero: embedded video → og:image verified by a vision call → else Pexels. Cached per domain for process life. `brand_video.py` — official YouTube channel (linked from the brand site, never searched) RSS feed matched to tab label, for Brand Intelligence leader cards
+- `logo_resolver.py` — validated `meta.logos` registry: Brandfetch → Google favicon → Iconify, rejects placeholders/duplicate bytes, editorial names get no logo
+- `verbatim_capture.py` — per quote: verified X/YouTube oEmbed embed → Playwright screenshot cached on S3 `verbatim_screenshots/` → scraped preview card → plain text. Served via `/consumer-intelligence/verbatim-image?key=`
+- `profile_images.py` + `post_avatar.py` — poster avatars (unavatar for X/YouTube, Tumblr API, forum/review pages scraped with scrapling; Instagram/Facebook/Reddit only with `UNAVATAR_API_KEY`), stored on S3 `profile_images/`, served via `/consumer-intelligence/profile-image?key=`. `product_images.py` — Pexels stock photo per Brand Perception product card, labelled stock
+- `qa_agent.py` — post-build verify-and-repair over the whole payload (post evidence ladder, quote text must be in its article, links http(s), every image/banner/logo/avatar actually loads; re-resolves or clears). Runs `CI_QA_ITERATIONS` passes (default 3, min 2) within `CI_QA_TIME_BUDGET_SECONDS`; writes `meta.qa`. Also callable via `POST /consumer-intelligence/qa`. `qa_render.py` — opens the FE in headless Chromium with the caller's bearer token to confirm images render (`POST /consumer-intelligence/qa/render`, needs `FRONTEND_URL`)
+- Extra endpoints: `GET /consumer-intelligence/brand-hero?brand=&domain=`, `GET /consumer-intelligence/stock-image?query=` (lens-picker cards)
+
+#### Caching (incremental, fingerprinted)
+
+Payload on S3 at `session_files/[{CI_CACHE_SCOPE}/]session_{id}/ci_charts_data/latest.json` (+ timestamped copy). `router._plan` compares cached lens keys with required keys and rebuilds only missing ones, merging via `_merge_payload` (drops stale coming-soon stubs). `refresh=true` rebuilds requested lenses but keeps others, so `?lenses=x&refresh=true` refreshes one lens safely. Every payload carries `meta.source`, a fingerprint of the session record (created_at, brand/competitor keywords) plus article ids and approved count; a mismatched fingerprint discards the cache (session ids get reused across recreated sessions / restored DBs). **Saved after every lens**, not only at the end: `build_ci_charts(on_lens_built=)` hands the router a snapshot (`meta.partial: true`) after each lens and `router._persist` merges, stamps and writes `latest.json`; the final write also adds the timestamped copy. A process killed mid-build (Render's 512 MiB free tier OOM-kills long builds) therefore leaves finished lenses for the next request, which builds only the rest. Concurrent GETs for the same session and lens set share one in-flight build (`router._inflight`). Both the GET and WS handlers copy the session fields they need via `_build_inputs` and call `db.close()` before the build, so waiting requests hold no pooled connection (pool is 5 + 10 overflow; idle holders produced `QueuePool limit reached` 500s). Local dev shares the S3 bucket with Render but not the DB, hence `CI_CACHE_SCOPE=local`.
+
+#### Adding a lens
+
+Tier-2 under an existing pillar: builder module with `LENS_KEY` + `build_storyboard()` (+ optional `prepare`, `PREPARE_KEY`) → register in `builder._MODULES/_ORDER/_HERO_QUERY` (+ `_HAS_PREPARE`, `_NEEDS_TAXONOMY`, `_NO_HERO_MEDIA`, `_VERBATIM_SECTIONS`) → facts/schema/apply + `_REGISTRY` entry in `narrative.py` → `tier_registry.TIER1_TO_LENS_KEYS`, `CI_LENS_KEYS` (+ `TIER2_GATE`) → FE `CI_LENS_KEYS`/`TIER1_TO_CI_KEYS`, screen, route, `tierLensData` `route:`. New Tier-1 pillar: one `TIER1_TO_LENS_KEYS` line plus the lens. Add an offline test in `tests/` for any media resolver.
+
 - Article gate matches MI: `is_approved_for_dashboards` rows if any approved, else all `is_relevant` rows
-- WS message types: `start` (with `cached` list), `progress` (stages `taxonomy`/`storyboard`/`narrative`), `lens_complete` (carries finished storyboard), `lens_error`, `complete` (with `incremental` flag), `error`
+- WS message types: `start` (with `cached` list), `progress` (stages `taxonomy`/`classify`/`storyboard`/`narrative`), `lens_complete` (carries finished storyboard), `lens_error`, `complete` (with `incremental` or `cached` flag), `error`
 
 ### WebSocket Endpoints
 
@@ -120,7 +159,7 @@ Sources (Google News RSS, SerpAPI, Tavily, Phyllo) → `raw_articles` → `agent
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/pr-solutions-dev.yaml`): push to `main` → Docker build → AWS ECR (`958065208983.dkr.ecr.us-west-1.amazonaws.com/pr-solutions-v2:<run_number>`) → replaces `_BUILD__ID_` in `build/pr-solutions-dev.yaml` → `kubectl apply` to EKS cluster `AMX-EKS`, namespace `pr-solutions-v2` → MS Teams notification. New env vars must be added to the k8s manifest's secret refs to reach the deployed pod.
+GitHub Actions (`.github/workflows/pr-solutions-dev.yaml`): push to `main` → Docker build → AWS ECR (`958065208983.dkr.ecr.us-west-1.amazonaws.com/pr-solutions-v2:<run_number>`) → replaces `_BUILD__ID_` in `build/pr-solutions-dev.yaml` → `kubectl apply` to EKS cluster `AMX-EKS`, namespace `pr-solutions-v2` → MS Teams notification. New env vars must be added to the k8s manifest's secret refs to reach the deployed pod; the manifest currently lacks every CI-package variable below (Brandfetch, Pexels, LLM audit, QA, `FRONTEND_URL`, `CI_CACHE_SCOPE`), so the k8s pod runs the CI lenses media-less. The Dockerfile does not run `playwright install` or `scrapling install`, so screenshots and stealth fetches are unavailable in that image too. Render is the other deploy target and does not auto-deploy on push.
 
 ## Key Environment Variables
 
@@ -132,15 +171,19 @@ GitHub Actions (`.github/workflows/pr-solutions-dev.yaml`): push to `main` → D
 | `RELEVANCY_MIN_CONFIDENCE` | Relevancy agent gate (default 0.5) |
 | `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `MAX_OUTPUT_TOKENS` | Anthropic Claude |
 | `AZURE_OPENAI_API_KEY/ENDPOINT/MODEL/API_VERSION`, `AZURE_OPENAI_WEB_SEARCH_MODEL` | Azure OpenAI |
-| `AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY/REGION`, `AWS_S3_BUCKET` | S3 storage (session files, CI cache) |
+| `AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY/REGION`, `AWS_S3_BUCKET` | S3 storage (session files, CI cache, screenshots, avatars) |
 | `AWS_S3_REACH_BUCKET/REACH_FILE`, `SIMILAR_WEB_REST_API_KEY`, `PUBLICATION_SOURCE_FILE` | Reach / publication lookups |
 | `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, `REFRESH_TOKEN_EXPIRE_DAYS` | Auth |
 | `CREDENTIALS_ENCRYPTION_KEY` | AES for stored provider credentials |
-| `EMBED_PROVIDER/MODEL/DIM`, `NVIDIA_EMBED_API_KEY/URL/MODEL` | RAG embeddings (`EMBED_DIM` must match pgvector column: nemotron 2048, BGE 1024) |
+| `EMBED_PROVIDER/MODEL/DIM`, `NVIDIA_EMBED_API_KEY/URL/MODEL/BATCH_SIZE` | RAG embeddings (`EMBED_DIM` must match pgvector column: nemotron 2048, BGE 1024) |
 | `RERANK_ENABLED/PROVIDER/MODEL`, `CHUNK_SIZE/OVERLAP`, `RETRIEVE_TOP_K`, `RERANK_TOP_N`, `VECTOR_TABLE_NAME` | RAG tuning |
 | `E2B_API_KEY` | Sandboxed code execution for chart agent |
 | `SERP_API_KEY` | SerpAPI Google News |
-| `BRANDFETCH_CLIENT_ID`, `BRANDFETCH_API_KEY`, `PEXELS_API_KEY` | CI storyboard media (all optional) |
+| `BRANDFETCH_CLIENT_ID`, `BRANDFETCH_API_KEY`, `PEXELS_API_KEY`, `UNAVATAR_API_KEY` | CI storyboard media (all optional; unavatar paid key unlocks Instagram/Facebook/Reddit avatars) |
 | `CI_CACHE_SCOPE` | Optional S3 key namespace for the CI charts cache; `local` in dev `.env`, empty on Render |
+| `DDGS_IMAGE_BACKEND`, `DDGS_TEXT_BACKEND`, `DDGS_TIMEOUT` | `ddgs` metasearch engines pinned to ones that answer from the server IP (defaults `bing` / `yahoo,startpage`, 4s); DuckDuckGo itself times out from Render |
+| `CI_QA_ITERATIONS`, `CI_QA_TIME_BUDGET_SECONDS` | QA agent passes (default 3, min 2) and wall-clock budget |
+| `FRONTEND_URL` | FE origin for `qa_render` browser check and logo-fetch Referer (default `http://localhost:3000`) |
 | `LLM_AUDIT_ASSISTANTS`, `LLM_AUDIT_TTL_DAYS`, `LLM_AUDIT_CONCURRENCY` | LLM audit run: assistants to attempt (default ChatGPT,Claude,Perplexity,Gemini), run reuse window (7), parallel calls (4) |
 | `PERPLEXITY_API_KEY`, `PERPLEXITY_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL` | Optional extra audit assistants; unset means the assistant is reported unavailable, never simulated |
+| `LOG_LEVEL`, `ENVIRONMENT` | Logging level; deployment label |

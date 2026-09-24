@@ -179,15 +179,33 @@ def _stamp_source(payload: dict, fingerprint: str | None) -> None:
         payload["meta"] = meta
 
 
-def _save_cache(session_id: int, payload: dict) -> None:
+def _save_cache(session_id: int, payload: dict, *, snapshot: bool = True) -> None:
+    """Write `latest.json`; with `snapshot`, also a timestamped copy. Partial
+    saves made mid-build skip the copy so a long build does not leave a dozen
+    near-identical snapshots behind."""
     try:
-        s3_file.upload_file(_cache_key(session_id), json.dumps(payload).encode("utf-8"))
-        s3_file.upload_file(
-            f"{_cache_prefix(session_id)}/ci_charts_data_{int(time.time())}.json",
-            json.dumps(payload).encode("utf-8"),
-        )
+        body = json.dumps(payload).encode("utf-8")
+        s3_file.upload_file(_cache_key(session_id), body)
+        if snapshot:
+            s3_file.upload_file(f"{_cache_prefix(session_id)}/ci_charts_data_{int(time.time())}.json", body)
     except Exception:
         logger.exception("Failed to cache CI charts for session_id=%s", session_id)
+
+
+def _persist(session_id: int, cached: dict | None, payload: dict, fingerprint: str | None, *, final: bool) -> dict:
+    """Merge `payload` over the cached lenses, stamp its source and write it.
+    Called after every lens (`final=False`, latest.json only) and once more
+    with the finished payload (`final=True`, plus a timestamped snapshot), so a
+    process killed mid-build leaves every finished lens on S3 for the next
+    request to reuse. Returns the merged payload."""
+    merged = jsonable_encoder(_merge_payload(cached, payload))
+    _stamp_source(merged, fingerprint)
+    _save_cache(session_id, merged, snapshot=final)
+    return merged
+
+
+async def _persist_async(*args: Any, **kwargs: Any) -> dict:
+    return await asyncio.to_thread(_persist, *args, **kwargs)
 
 
 def _workflow_nodes(record) -> list[dict]:
@@ -347,6 +365,12 @@ async def ci_charts(
     # `refresh` rebuilds the required lenses but keeps other cached lenses.
     tagged_articles = _articles_for_charts(db, session_id)
     fingerprint = _fingerprint(record, tagged_articles)
+    inputs = _build_inputs(record)
+    # Everything the build needs is now in memory. Give the pooled connection
+    # back before the minutes-long wait below: a request that holds one while
+    # idle starves the pool (size 5 + overflow 10) when several tabs wait on
+    # the same build, and the 16th caller got a "QueuePool limit reached" 500.
+    db.close()
     cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh, fingerprint)
     if cached and not missing:
         return cached
@@ -362,7 +386,7 @@ async def ci_charts(
     key = (session_id, tuple(missing))
     task = _inflight.get(key)
     if task is None:
-        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, record, with_media, skip, cached, missing, refresh=refresh, fingerprint=fingerprint))
+        task = asyncio.create_task(_build_and_cache(session_id, nodes, lenses or None, tagged_articles, inputs, with_media, skip, cached, missing, refresh=refresh, fingerprint=fingerprint))
         _inflight[key] = task
         task.add_done_callback(lambda _t, _k=key: _inflight.pop(_k, None))
     else:
@@ -379,23 +403,37 @@ async def ci_charts(
 _inflight: dict[tuple, asyncio.Task] = {}
 
 
-async def _build_and_cache(session_id, nodes, lenses, tagged_articles, record, with_media, skip, cached, missing, refresh: bool = False, fingerprint: str | None = None) -> dict:
+def _build_inputs(record) -> dict[str, Any]:
+    """The session fields a build reads, copied out of the ORM row so the DB
+    session can be closed before the build starts."""
+    return {
+        "brand_keywords": list(getattr(record, "brand_keywords", None) or []),
+        "competitor_keywords": list(getattr(record, "competitor_keywords", None) or []),
+        "category": _session_category(record),
+    }
+
+
+async def _build_and_cache(session_id, nodes, lenses, tagged_articles, inputs: dict, with_media, skip, cached, missing, refresh: bool = False, fingerprint: str | None = None) -> dict:
     started = time.time()
+
+    async def save_partial(lens_key: str, snapshot: dict) -> None:
+        await _persist_async(session_id, cached, snapshot, fingerprint, final=False)
+        logger.info("CI charts partial save for session_id=%s after %s", session_id, lens_key)
+
     payload = await build_ci_charts(
         workflow_nodes=nodes,
         requested_lenses=lenses,
         tagged_articles=tagged_articles,
-        brand_keywords=record.brand_keywords,
-        competitor_keywords=record.competitor_keywords,
+        brand_keywords=inputs["brand_keywords"],
+        competitor_keywords=inputs["competitor_keywords"],
         with_media=with_media,
         skip_lenses=skip,
         session_id=session_id,
         refresh=refresh,
-        category=_session_category(record),
+        category=inputs["category"],
+        on_lens_built=save_partial,
     )
-    response = jsonable_encoder(_merge_payload(cached, payload))
-    _stamp_source(response, fingerprint)
-    _save_cache(session_id, response)
+    response = await _persist_async(session_id, cached, payload, fingerprint, final=True)
     logger.info("CI charts generated for session_id=%s (%s) in %.1fs", session_id, ",".join(missing), time.time() - started)
     return response
 
@@ -433,6 +471,8 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
         nodes = _workflow_nodes(record)
         tagged_articles = _articles_for_charts(db, session_id)
         fingerprint = _fingerprint(record, tagged_articles)
+        inputs = _build_inputs(record)
+        db.close()  # same reason as in ci_charts: hold no pooled connection across the build
         cached, required, skip, missing = _plan(session_id, nodes, lenses or None, refresh, fingerprint)
         if cached and not missing:
             await websocket.send_json({"type": "complete", "cached": True, "charts_data": cached})
@@ -451,23 +491,25 @@ async def ci_charts_stream(websocket: WebSocket, db: Session = Depends(get_db)) 
             async with send_lock:
                 await websocket.send_json(jsonable_encoder(payload))
 
+        async def save_partial(lens_key: str, snapshot: dict) -> None:
+            await _persist_async(session_id, cached, snapshot, fingerprint, final=False)
+
         started = time.time()
         payload = await build_ci_charts(
             workflow_nodes=nodes,
             requested_lenses=lenses or None,
             tagged_articles=tagged_articles,
-            brand_keywords=record.brand_keywords,
-            competitor_keywords=record.competitor_keywords,
+            brand_keywords=inputs["brand_keywords"],
+            competitor_keywords=inputs["competitor_keywords"],
             on_event=emit,
             with_media=bool(with_media),
             skip_lenses=skip,
             session_id=session_id,
             refresh=bool(refresh),
-            category=_session_category(record),
+            category=inputs["category"],
+            on_lens_built=save_partial,
         )
-        response = jsonable_encoder(_merge_payload(cached, payload))
-        _stamp_source(response, fingerprint)
-        _save_cache(session_id, response)
+        response = await _persist_async(session_id, cached, payload, fingerprint, final=True)
         await emit(
             {
                 "type": "complete",

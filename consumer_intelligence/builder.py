@@ -46,6 +46,9 @@ from .tier_registry import COMING_SOON_TIER1, resolve_ci_lenses
 logger = logging.getLogger(__name__)
 
 EmitFn = Callable[[dict[str, Any]], Awaitable[None] | None]
+# Called after every lens with (lens_key, payload_so_far) so the caller can
+# persist partial progress; see build_ci_charts(on_lens_built=).
+LensBuiltFn = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 
 _MODULES = {
     trend.LENS_KEY: trend,
@@ -342,6 +345,7 @@ async def build_ci_charts(
     session_id: int | None = None,
     refresh: bool = False,
     category: str = "",
+    on_lens_built: LensBuiltFn | None = None,
 ) -> dict[str, Any]:
     """Build every selected CI lens. Returns `{lens_key: storyboard, ..., "coming_soon": {...}, "meta": {...}}`.
 
@@ -349,6 +353,15 @@ async def build_ci_charts(
     session's workflow analysis nodes. Unknown keys are ignored.
     `skip_lenses` are selected lenses the caller already has (cached) and does
     not want rebuilt; they are reported in meta but not built.
+
+    `on_lens_built(lens_key, payload_so_far)` fires after every lens (built or
+    failed) with a snapshot carrying every lens finished so far and a `meta`
+    marked `partial: True`. A build of a dozen lenses takes minutes and the
+    process hosting it can die part-way (Render kills the container at its
+    memory limit); a caller that saves each snapshot loses one lens to such a
+    crash instead of the whole run, because the next request skips lenses the
+    cache already holds. Errors in the callback are logged and never stop the
+    build.
     """
     if requested_lenses:
         lens_keys = [k for k in requested_lenses if k in _MODULES]
@@ -375,6 +388,22 @@ async def build_ci_charts(
     prepared_cache: dict[str, dict] = {}
     context = {"session_id": session_id, "refresh": refresh, "category": category}
     started = time.time()
+
+    def _meta(built: list[str], *, partial: bool) -> dict[str, Any]:
+        meta = {
+            "provider": "consumer_intelligence",
+            "lenses": lens_keys,
+            "built": built,
+            "coming_soon": coming_soon,
+            "brand": brand,
+            "competitors": [b for b in known if b != brand],
+            "total_articles": len(tagged_articles),
+            "elapsed_seconds": round(time.time() - started, 1),
+        }
+        if partial:
+            meta["partial"] = True
+        return meta
+
     for lens_key in to_build:
         try:
             out[lens_key] = await _build_one(lens_key, tagged_articles, brand, known, on_event, with_media=with_media, theme_taxonomy=theme_taxonomy, prepared_cache=prepared_cache, context=context)
@@ -383,21 +412,20 @@ async def build_ci_charts(
             logger.exception("CI lens %s failed", lens_key)
             out[lens_key] = {"meta": {"lens": lens_key, "error": str(exc)}, "status": "failed"}
             await _emit(on_event, {"type": "lens_error", "lens": lens_key, "detail": str(exc)})
+        if on_lens_built is not None:
+            snapshot = {**out, "coming_soon": {k: {"status": "coming_soon"} for k in coming_soon}, "meta": _meta(list(out.keys()), partial=True)}
+            try:
+                result = on_lens_built(lens_key, snapshot)
+                if result is not None:
+                    await result
+            except Exception:  # persistence is best-effort; the build itself must go on
+                logger.exception("CI on_lens_built failed after %s", lens_key)
 
     for key in coming_soon:
         out[key] = {"status": "coming_soon", "lens": key}
 
     out["coming_soon"] = {k: {"status": "coming_soon"} for k in coming_soon}
-    out["meta"] = {
-        "provider": "consumer_intelligence",
-        "lenses": lens_keys,
-        "built": to_build,
-        "coming_soon": coming_soon,
-        "brand": brand,
-        "competitors": [b for b in known if b != brand],
-        "total_articles": len(tagged_articles),
-        "elapsed_seconds": round(time.time() - started, 1),
-    }
+    out["meta"] = _meta(to_build, partial=False)
     if with_media:
         # Cross-check the generated JSON against the source articles and repair it, with fallbacks (meta.qa).
         await qa_agent.run(out, tagged_articles)

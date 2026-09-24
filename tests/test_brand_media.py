@@ -216,8 +216,12 @@ def test_duckduckgo_image_extracts_the_first_hits_url_and_title():
     fake_module = types.ModuleType("ddgs")
 
     class FakeDDGS:
-        def images(self, query, max_results=1, safesearch="moderate"):
+        def __init__(self, timeout=None):
+            assert timeout == brand_media.DDG_TIMEOUT
+
+        def images(self, query, max_results=1, safesearch="moderate", backend="auto"):
             assert query == "Armor All Car care Awareness"
+            assert backend == brand_media.DDG_IMAGE_BACKEND
             return [{"image": "https://retailer.example/product.jpg", "title": "Armor All Wipes"}]
 
     fake_module.DDGS = FakeDDGS
@@ -245,7 +249,10 @@ def test_duckduckgo_image_returns_none_when_the_search_raises():
     fake_module = types.ModuleType("ddgs")
 
     class FakeDDGS:
-        def images(self, query, max_results=1, safesearch="moderate"):
+        def __init__(self, timeout=None):
+            pass
+
+        def images(self, query, max_results=1, safesearch="moderate", backend="auto"):
             raise RuntimeError("rate limited")
 
     fake_module.DDGS = FakeDDGS
@@ -361,7 +368,10 @@ def test_duckduckgo_image_skips_an_unrenderable_hit_and_returns_the_next_usable_
         ]
 
     class FakeDDGS:
-        def images(self, query, max_results=1, safesearch="moderate"):
+        def __init__(self, timeout=None):
+            pass
+
+        def images(self, query, max_results=1, safesearch="moderate", backend="auto"):
             return fake_search()
 
     import sys
@@ -388,7 +398,10 @@ def test_duckduckgo_image_returns_none_when_every_hit_is_unrenderable():
     import types
 
     class FakeDDGS:
-        def images(self, query, max_results=1, safesearch="moderate"):
+        def __init__(self, timeout=None):
+            pass
+
+        def images(self, query, max_results=1, safesearch="moderate", backend="auto"):
             return [{"image": "https://lookaside.fbsbx.com/x", "title": "fb"}]
 
     fake_module = types.ModuleType("ddgs")
@@ -413,7 +426,10 @@ def test_duckduckgo_image_skips_a_dead_candidate_and_returns_the_next_live_one()
     link nobody catches until it renders blank on the FE."""
 
     class FakeDDGS:
-        def images(self, query, max_results=1, safesearch="moderate"):
+        def __init__(self, timeout=None):
+            pass
+
+        def images(self, query, max_results=1, safesearch="moderate", backend="auto"):
             return [
                 {"image": "https://deadcdn.example.com/gone.jpg", "title": "dead"},
                 {"image": "https://livecdn.example.com/real.jpg", "title": "live"},
@@ -442,7 +458,10 @@ def test_duckduckgo_image_skips_a_dead_candidate_and_returns_the_next_live_one()
 
 def test_duckduckgo_image_returns_none_when_every_candidate_is_dead():
     class FakeDDGS:
-        def images(self, query, max_results=1, safesearch="moderate"):
+        def __init__(self, timeout=None):
+            pass
+
+        def images(self, query, max_results=1, safesearch="moderate", backend="auto"):
             return [{"image": "https://deadcdn.example.com/gone.jpg", "title": "dead"}]
 
     fake_module = types.ModuleType("ddgs")

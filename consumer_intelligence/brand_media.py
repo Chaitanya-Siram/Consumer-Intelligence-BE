@@ -306,6 +306,19 @@ async def pexels_photo(query: str, *, orientation: str = "landscape") -> dict | 
 
 
 _DDG_RESULTS = 5  # candidates fetched so a blocked-host hit doesn't waste the whole search
+# `ddgs` is a metasearch client: with the default backend="auto" it fans every
+# query out to all engines it knows (for images: Bing and DuckDuckGo) and logs
+# an "Error in engine duckduckgo: TimeoutException" for each one that never
+# answers. From Render's egress IPs DuckDuckGo's HTML endpoint times out on
+# every single call (0 of 107 attempts in one afternoon) while Bing Images
+# answers 200 every time, so the search is pinned to the engines that work
+# and given a short timeout — a dead engine otherwise costs the full 5s wait
+# per banner query, dozens of times per build. Override per deployment with
+# DDGS_IMAGE_BACKEND / DDGS_TEXT_BACKEND (comma-separated engine names) and
+# DDGS_TIMEOUT if another region's IPs see a different picture.
+DDG_IMAGE_BACKEND = os.getenv("DDGS_IMAGE_BACKEND", "bing")
+DDG_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "yahoo,startpage")  # ddgs has no Bing text engine
+DDG_TIMEOUT = float(os.getenv("DDGS_TIMEOUT", "4"))
 # Hosts whose images a plain server-side fetch can load but a real browser
 # cannot: lookaside.fbsbx.com is Facebook's *own crawler's* proxy for a page's
 # preview image — it answers a bare GET (curl, httpx) but rejects the request
@@ -367,7 +380,7 @@ async def duckduckgo_image(query: str) -> dict | None:
         from ddgs import DDGS
 
         def _search() -> list[dict]:
-            return DDGS().images(query, max_results=_DDG_RESULTS, safesearch="moderate")
+            return DDGS(timeout=DDG_TIMEOUT).images(query, max_results=_DDG_RESULTS, safesearch="moderate", backend=DDG_IMAGE_BACKEND)
 
         results = await asyncio.to_thread(_search)
         candidates = [r for r in (results or []) if r.get("image") and _is_browser_renderable(r["image"])]

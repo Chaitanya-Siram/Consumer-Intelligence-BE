@@ -25,7 +25,11 @@ def setup_logging(level: str | int | None = None) -> logging.Logger:
         handler._pr_solutions = True  # type: ignore[attr-defined]
         root.addHandler(handler)
 
-    for noisy in ("urllib3", "httpx", "httpcore", "openai", "anthropic"):
+    # ddgs logs every engine that failed to answer at INFO ("Error in engine
+    # duckduckgo: TimeoutException(...)"); primp is its HTTP client. Both are
+    # handled inside brand_media/brand_video with their own fallbacks, so only
+    # real warnings belong in the app log.
+    for noisy in ("urllib3", "httpx", "httpcore", "openai", "anthropic", "ddgs", "primp"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     return logging.getLogger("pr_solutions")

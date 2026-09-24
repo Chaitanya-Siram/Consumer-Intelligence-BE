@@ -162,7 +162,10 @@ async def _search_channel_paths(brand: str) -> list[str]:
         try:
             from ddgs import DDGS
 
-            results = await asyncio.to_thread(lambda q=query: DDGS().text(q, max_results=8))
+            from .brand_media import DDG_TEXT_BACKEND, DDG_TIMEOUT
+
+            # Pinned to engines that answer from the server's IPs; see brand_media.DDG_TEXT_BACKEND.
+            results = await asyncio.to_thread(lambda q=query: DDGS(timeout=DDG_TIMEOUT).text(q, max_results=8, backend=DDG_TEXT_BACKEND))
         except Exception as exc:  # the search is flaky: another phrasing may still work
             logger.debug("channel search failed for %r: %s", query, exc)
             continue
